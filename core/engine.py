@@ -149,6 +149,7 @@ class Table:
 
         # Total pot accumulated from completed streets
         pot_total = 0.0  # IMPORTANT: start at 0, not blinds
+        running_pot = 0.0
 
         # --- main street loop ---
         for street_name, fn in streets:
@@ -180,7 +181,7 @@ class Table:
                 }
 
             # No winner yet: move this street's contributions into pot_total
-            pot_total += sum(contrib.values())
+            running_pot += sum(contrib.values())
 
             # Reset contrib for next street (only active ring players matter)
             contrib = defaultdict(float, {seats[i].player_id: 0.0 for i in ring})
@@ -225,8 +226,28 @@ class Table:
             deck = self._deck
         return deck.pop()
 
-    def _betting_round(self, street, seats, ring, pos_by_pid, hole, board, contrib, pot, bb, bot_for, history, on_event):
+    def _betting_round(
+        self,
+        street,
+        seats,
+        ring,
+        pos_by_pid,
+        hole,
+        board,
+        contrib,
+        pot,
+        bb,
+        bot_for,
+        history,
+        on_event,
+    ):
+        # --- DEBUG: start of round ---
+        print(f"\n=== BETTING ROUND START: {street} ===")
+        print(f"Pot before street: {pot:.2f}")
+        print("Ring order:", [seats[i].player_id for i in ring])
+        print("Initial contrib:", {pid: float(contrib.get(pid, 0.0)) for pid in contrib})
 
+        # If contrib is empty, initialize per-player for this street
         if not contrib:
             contrib = defaultdict(float, {s.player_id: 0.0 for s in seats if not s.is_sitting_out})
         else:
@@ -240,15 +261,17 @@ class Table:
 
         def all_live_equal():
             live_contribs = {
-            contrib.get(seats[i].player_id, 0.0)
-            for i in ring
-            if not folded[seats[i].player_id]
-        }
+                contrib.get(seats[i].player_id, 0.0)
+                for i in ring
+                if not folded[seats[i].player_id] and seats[i].chips >= 0
+            }
             return len(live_contribs) <= 1
 
+        # --- MAIN LOOP ---
         while True:
             safety += 1
-            if safety > 100:
+            if safety > 200:
+                print("!!! SAFETY BREAK in betting_round (too many iterations)")
                 break
 
             si = ring[idx]
@@ -258,8 +281,8 @@ class Table:
             # Skip folded or all-in players
             if seat.chips <= 0 or folded[pid] or allin[pid]:
                 idx = (idx + 1) % len(ring)
-                # End round early if everyone left has equal bets
                 if all_live_equal():
+                    print("All live contributions equal → ending round")
                     break
                 continue
 
@@ -276,53 +299,119 @@ class Table:
                 legal.append({"type": "fold"})
                 legal.append({"type": "call"})
                 if seat.chips > to_call:
-                    legal.append({"type": "raise", "min": to_call + min_raise_unit, "max": seat.chips})
+                    legal.append({
+                        "type": "raise",
+                        "min": to_call + min_raise_unit,
+                        "max": seat.chips,
+                    })
 
+            # --- DEBUG: show state before action ---
+            print(
+                f"[{street}] Acting: {pid} | chips={seat.chips:.2f} "
+                f"contrib={contrib[pid]:.2f} to_call={to_call:.2f} "
+                f"pot_now={pot + sum(contrib.values()):.2f}"
+            )
+            print("    Legal:", legal)
+
+            # Build PlayerView
             view = PlayerView(
                 me=pid,
                 street=street,
                 position=pos_by_pid[pid],
                 hole_cards=hole[pid],
                 board=list(board),
-                pot=sum(contrib.values()),
+                pot=pot + sum(contrib.values()),
                 to_call=to_call,
                 min_raise=to_call + min_raise_unit if to_call > 0 else min_raise_unit,
                 max_raise=max_raise,
                 legal_actions=legal,
                 stacks={seats[i].player_id: seats[i].chips for i in ring},
                 opponents=[seats[i].player_id for i in ring if seats[i].player_id != pid],
-                history=list(history)
+                history=list(history),
             )
 
-            action = bot_for[pid].act(view)
+            # Get action from bot
+            raw_action = bot_for[pid].act(view)
+            action_type = raw_action.type
+            action_amount = raw_action.amount
 
-            # --- Handle chosen action ---
+            # --- SANITY CHECKS on action ---
+            legal_types = {a["type"] for a in legal}
+            if action_type not in legal_types:
+                print(f"    [WARN] Bot {pid} chose illegal type '{action_type}', fixing...")
+                if "call" in legal_types:
+                    action_type = "call"
+                elif "check" in legal_types:
+                    action_type = "check"
+                else:
+                    action_type = "fold"
+
+            if action_type in ("bet", "raise"):
+                # Look up corresponding action constraints
+                act_spec = next(a for a in legal if a["type"] == action_type)
+                lo, hi = act_spec["min"], act_spec["max"]
+                if action_amount is None:
+                    action_amount = lo
+                action_amount = max(lo, min(hi, float(action_amount)))
+            else:
+                action_amount = None
+
+            # Wrap back into Action for uniform handling
+            action = Action(action_type, action_amount)
+
+            print(f"    Chosen action: type={action.type}, amount={action.amount}")
+
+            # Add to history (simple format)
+            history.append({
+                "street": street,
+                "pid": pid,
+                "type": action.type,
+                "amount": action.amount,
+                "to_call_before": to_call,
+            })
+
+            # --- Apply chosen action ---
             if action.type == "fold":
                 folded[pid] = True
-                # Mark player as no longer eligible for showdown
-                hole[pid] = []
+                hole[pid] = []  # no longer eligible for showdown
+                print(f"    {pid} FOLDS")
             elif action.type == "call":
                 need = min(seat.chips, to_call)
                 seat.chips -= need
                 contrib[pid] += need
                 if seat.chips <= 0:
                     allin[pid] = True
+                print(f"    {pid} CALLS {need:.2f} (chips now {seat.chips:.2f})")
             elif action.type in ("bet", "raise"):
-                amt = min(max(action.amount or 0.0, bb), seat.chips + contrib.get(pid, 0.0))
+                amt = action.amount or 0.0
+                amt = min(max(amt, bb), seat.chips + contrib.get(pid, 0.0))
                 need = max(0.0, amt - contrib.get(pid, 0.0))
                 seat.chips -= need
                 contrib[pid] += need
                 if seat.chips <= 0:
                     allin[pid] = True
+                print(
+                    f"    {pid} {action.type.upper()} to {amt:.2f} "
+                    f"(paid {need:.2f}, chips now {seat.chips:.2f})"
+                )
 
-            # End round if everyone left has matched contributions <-
-            if all_live_equal:
+            # --- DEBUG: after action ---
+            print("    contrib now:", {seats[i].player_id: float(contrib[seats[i].player_id]) for i in ring})
+
+            # End round if everyone left has matched contributions
+            if all_live_equal():
+                print("All live contributions equal after this action → ending round")
                 break
 
+            # Advance to next player
             idx = (idx + 1) % len(ring)
 
+        # Determine if only one player remains
         alive = [seats[i].player_id for i in ring if not folded[seats[i].player_id]]
+        print(f"=== BETTING ROUND END: {street} | Alive: {alive} ===")
+
         if len(alive) == 1:
+            print(f"--> Winner by fold on {street}: {alive[0]}")
             return alive[0]
         return None
 
