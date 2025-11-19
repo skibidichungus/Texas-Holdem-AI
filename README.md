@@ -1,29 +1,31 @@
 # Texas Hold’em Bot Project
 
 This project contains:
-- **A complete poker engine (betting rounds, blinds, pot distribution)
-- **A configurable AI bot system
-- **A SmartBot (PokerMindBot) with preflop + postflop heuristics
-- **A tournament runner for simulating many hands locally
-This version includes major improvements to engine stability, game correctness, and bot intelligence.
+- A complete poker engine (betting rounds, blinds, pot distribution)
+- A configurable AI bot system (plug-in architecture)
+- A SmartBot (PokerMindBot) with heuristics for preflop + postflop
+- MonteCarloBot that makes decisions using simulated rollouts
+- A tournament runner for simulating many hands locally
+This version includes major engine stability fixes, legal action correctness, and full MonteCarloBot integration.
 
 ## Structure
 
 ```
 Texas Hold'em Bot/
 ├── core/
-│   ├── engine.py         # Poker game engine (stable, fixed version)
-│   ├── bot_api.py        # PlayerView, Action, BotAdapter wrappers
+│   ├── engine.py           # Poker game engine (stable, fixed version)
+│   ├── bot_api.py          # PlayerView, Action, adapter wrappers
 │   └── __init__.py
 │
 ├── bots/
-│   ├── poker_mind_bot.py # SmartBot (heuristic + bluffing)
-│   ├── train.py          # Placeholder for future RL training
-│   ├── model.pkl         # Placeholder model file
+│   ├── poker_mind_bot.py   # SmartBot (heuristics + bluffing logic)
+│   ├── monte_carlo_bot.py  # MonteCarloBot (rollout simulation bot)
+│   ├── train.py            # Placeholder for future RL training
+│   ├── model.pkl           # Placeholder model
 │   └── __init__.py
 │
-├── run_local_match.py    # Entry script for running matches
-└── README.md             # (this file)
+├── run_local_match.py      # Script to run a match or tournament
+└── README.md
 ```
 
 ## How to Run
@@ -35,8 +37,9 @@ or specify number of hands:
 ```bash
 python3 run_local_match.py --hands 50
 ```
+You can swap which bots are used inside run_local_match.py.
 
-## About the PokerMindBot (SmartBot)
+## PokerMindBot (SmartBot)
 Located at:
 ```bash
 bots/poker_mind_bot.py
@@ -51,7 +54,6 @@ Uses:
 ```bash
 approx_score(hole + board)
 ```
-Behavior:
 - Strong hands → bet/raise (~50% pot)
 - Medium hands → call small bets
 - Weak hands → check/fold
@@ -59,30 +61,38 @@ Behavior:
 
 ### Safety Guarantees
 SmartBot ALWAYS:
-- Chooses legal actions
+- Never makes illegal actions
 - Respects to_call
-- Avoids illegal checks/raises
-- Does not cause infinite loops
+- Never checks when facing a bet
+- Never raises below min or above stack
+
+## MonteCarloBot (Rollout Bot)
+Located in:
+```bash
+bots/monte_carlo_bot.py
+```
+### How it works:
+- Simulates random future boards
+- Estimates win-rate by rolling out 200–500 trials
+- Chooses the action with the best expected value
+- Adapts to board texture, number of players, stack depth
+- Handles all legal bet/call/raise options
+Note: strongest bot so far...
 
 ## About the Engine
 Located in:
 ```bash
 core/engine.py
 ```
-### Features:
+### Engine Features:
 - Correct blinds posting
-- Stable betting rounds with safety breakers
-- all_live_equal() logic ensures rounds terminate
-- Street handling:
- - Preflop
- - Flop (deal 3)
- - Turn (deal 1)
- - River (deal 1)
-- Pot settlement:
- - Fold win (immediate)
- - Showdown (approx hand scoring)
-- Tournament mode via TournamentManager
-The engine is now fully deterministic and stable across 3+ player simulations.
+- Correct betting cycle with safety-breaks
+- Fixed all-live-equal logic (rounds end at correct time)
+- Street transitions: preflop → flop → turn → river
+- Showdown using approximate scoring
+- Fold-wins return immediately
+- Tournament support via TournamentManager
+The engine is now stable across 3–6 players for long simulations.
 
 ## Example output
 ```bash
@@ -98,7 +108,7 @@ Net chips:
 ```
 
 ## Adding Your Own Bot
-Create new files in:
+Create a new file under:
 ```bash
 bots/
 ```
@@ -108,53 +118,45 @@ class MyBot:
     def act(self, state):
         return {"type": "fold"}
 ```
-Bots interact with the engine via the adapter system in:
+Bots interact with the engine via:
 ```bash
 core/bot_api.py
 ```
 
 ## Future Work
-Below are planned enhancements and stretch goals for the project:
 
 ### Engine Improvements
-- Add full 7-card hand evaluator for accurate showdowns
-- Improve approx_score to consider:
- - draws (flush/straight)
- - blockers
- - board texture
-- Add full support for side pots in multi-all-in scenarios
-- Add deterministic seeding for reproducible simulations
-- Add “heads-up mode” optimizations
+- Replace approx_score with full 7-card hand evaluator
+- Add side-pot support for multi-all-in
+- Add deterministic RNG seeding
+- Improve board texture analysis (paired boards, flush draws)
+- Add optional “fast engine mode” for 50k+ simulations
 
-### Bot Development
-- Add Monte Carlo rollout bot (simulate random future boards)
-- Integrate RL training (policy gradient / Q-learning) in bots/train.py
-- Add opponent modeling (track player tendencies over many hands)
-- Implement a GTO-inspired bot (solvers, balanced strategies)
-- Add memory-based bot that adapts during a tournament
-- Add configurable difficulty modes (“Easy”, “Normal”, “Smart”, “Insane”)
+### Bots
+- RL training pipeline inside bots/train.py
+- Opponent modeling / tracking tendencies
+- GTO-inspired balanced strategy bot
+- Memory-based adapting bot
+- Difficulty modes (“Easy”, “Normal”, “Smart”, “Insane”)
 
 ### Tooling & Testing
-- Add unit tests for engine, bot actions, and edge cases
-- Add integration tests simulating full tournaments
-- Add GitHub Actions to auto-run matches on PRs
-- Add visualization of:
- - stack progression
- - win-rate charts
- - showdown frequency
-- Add logging to JSON/CSV to help bot developers debug strategies
+- Unit tests for the engine
+- Integration tests for full tournaments
+- GitHub Actions CI for auto-running matches
+- Logging to JSON/CSV
+- Plot stack graphs, showdown charts, win-rate curves
 
 ### Tournament System
-- Implement Swiss, Round Robin, and Knockout tournament formats
-- Add leaderboard output (ELO rating, profit graphs)
-- Allow remote bots via HTTP/WebSocket API
-- Add configurable blind structures (turbo, deepstack)
+- Swiss, Round Robin, Knockout
+- Leaderboards with ELO ratings
+- Blind-structure presets (turbo, deepstack)
+- Remote bots over HTTP / WebSocket
 
 ### Developer Experience
-- Add a clear CONTRIBUTING.md for bot authors
-- Add example bots (tight, loose, aggressive, random, etc.)
-- Add a CLI for:
+- CONTRIBUTING.md for bot authors
+- Example bots (tight, loose, random)
+- CLI:
 ```bash
-python3 run_local_match.py --bot1 MyBot --bot2 PokerMindBot --hands 500
+python3 run_local_match.py --bot1 SmartBot --bot2 MonteCarloBot --hands 500
 ```
-- **Add documentation website (MkDocs / GitHub Pages)
+- Documentation website (MkDocs)
