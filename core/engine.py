@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from collections import defaultdict, deque
 
 from .bot_api import Action, PlayerView, BotAdapter
+from core.logger import DecisionLogger # imports logger.py
 
 RANKS = "23456789TJQKA"
 SUITS = "cdhs"
@@ -168,6 +169,9 @@ class Table:
 
     def play_hand(self, seats: List[Seat | Dict[str, Any]], small_blind: float, big_blind: float,
                   dealer_index: int, bot_for: Dict[str, BotAdapter], on_event=None) -> Dict[str, float]:
+        
+        logger = DecisionLogger(enabled=True)
+
         # Normalize seats
         seats = [s if isinstance(s, Seat) else Seat(**s) for s in seats]
         by_pid = {s.player_id: s for s in seats}
@@ -228,6 +232,7 @@ class Table:
 
         # --- main street loop ---
         for street_name, fn in streets:
+
             winner = fn(
                 street_name,
                 seats,
@@ -236,29 +241,28 @@ class Table:
                 hole,
                 board,
                 contrib,
-                pot_total,      # we don't actually mutate this inside
+                pot_total,
                 big_blind,
                 bot_for,
                 history,
                 on_event,
+                logger=logger,   # <===== PASS LOGGER HERE
             )
 
             # If someone wins by everyone else folding
             if isinstance(winner, str):
                 total_pot = pot_total + sum(contrib.values())
-                # Award full pot to winner
                 by_pid[winner].chips += total_pot
 
-                # Compute per-player net change vs start of hand
                 return {
                     pid: by_pid[pid].chips - start_chips.get(pid, by_pid[pid].chips)
                     for pid in start_chips
                 }
 
-            # No winner yet: move this street's contributions into pot_total
-            running_pot += sum(contrib.values())
+            # No winner yet — move this street's contribs into pot_total
+            pot_total += sum(contrib.values())
 
-            # Reset contrib for next street (only active ring players matter)
+            # Reset contrib for next street
             contrib = defaultdict(float, {seats[i].player_id: 0.0 for i in ring})
 
         # --- showdown ---
@@ -276,6 +280,8 @@ class Table:
             pid: by_pid[pid].chips - start_chips.get(pid, by_pid[pid].chips)
             for pid in start_chips
         }
+
+        logger.flush()
         return net
 
     def _deal_flop_then_bet(self, *a, **k):
@@ -301,21 +307,8 @@ class Table:
             deck = self._deck
         return deck.pop()
 
-    def _betting_round(
-        self,
-        street,
-        seats,
-        ring,
-        pos_by_pid,
-        hole,
-        board,
-        contrib,
-        pot,
-        bb,
-        bot_for,
-        history,
-        on_event,
-    ):
+    def _betting_round( self, street, seats, ring, pos_by_pid, hole, board, contrib, pot, bb, bot_for, history, on_event, logger):
+
         # --- DEBUG: start of round ---
         print(f"\n=== BETTING ROUND START: {street} ===")
         print(f"Pot before street: {pot:.2f}")
@@ -487,6 +480,24 @@ class Table:
 
             # Get action from bot
             raw_action = bot_for[pid].act(view)
+
+            # Log training data
+            logger.log_decision({
+                "player": pid,
+                "street": street,
+                "hole": hole[pid],
+                "board": list(board),
+                "pot": view.pot,
+                "to_call": view.to_call,
+                "legal": view.legal_actions,
+                "chosen_action": {
+                    "type": raw_action.type,
+                    "amount": raw_action.amount,
+                },
+                "stacks": view.stacks,
+                "opponents": view.opponents,
+            })
+
             action_type = raw_action.type
             action_amount = raw_action.amount
 
