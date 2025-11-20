@@ -1,0 +1,15 @@
+# Logs (never commit)
+logs/
+
+# Python caches
+__pycache__/
+*.pyc
+
+# ML experimental stuff (not ready yet)
+bots/ml_bot.py
+bots/train_ml_bot.py
+bots/data/
+bots/models/
+
+# Mac junk
+.DS_Store

@@ -39,6 +39,94 @@ python3 run_local_match.py --hands 50
 ```
 You can swap which bots are used inside run_local_match.py.
 
+## Decision Logging
+Every hand is now logged automatically to:
+```bash
+logs/YYYY-MM-DD_HHMMSS/
+```
+Each bot’s decisions are stored as newline-separated JSON objects in:
+```bash
+logs/<timestamp>/hand_<N>.jsonl
+```
+### Example log entry
+```bash
+{
+  "player": "P2",
+  "street": "turn",
+  "hole": [["A", "h"], ["8", "s"]],
+  "board": [["J","d"],["7","h"],["2","c"],["Q","s"]],
+  "pot": 34.0,
+  "to_call": 4.0,
+  "legal": [
+    {"type": "fold"},
+    {"type": "call"},
+    {"type": "raise", "min": 12.0, "max": 188.0}
+  ],
+  "chosen_action": {"type": "call", "amount": 4.0},
+  "stacks": {"P1": 195, "P2": 144, "P3": 161},
+  "opponents": ["P1","P3"],
+  "folded": false,
+  "hand_id": 27
+}
+```
+### What gets logged
+- Hole cards (P1 never sees opponents’ hole cards)
+- Board cards at time of action
+- Pot size
+- Amount needed to call
+- Legal actions (fold/check/call/raise info)
+- Final chosen action
+- Stack sizes
+- Which opponents are in the hand
+- Whether the bot is folded on this street
+- hand_id (stable across all logs)
+
+### Hand Result Logs
+At the end of each hand:
+```bash
+{"hand_id": 27, "result": {"player": "P1", "net": +12.0}}
+```
+
+## Finding the Most Recent Log
+Logs are stored in timestamped folders:
+```bash
+logs/2025-11-19_1458/
+logs/2025-11-19_1523/
+logs/2025-11-19_1650/
+```
+The most recent folder is the one with the latest timestamp.
+Use macOS Terminal:
+```bash
+ls -1 logs | sort
+```
+Or newest first:
+```bash
+ls -1t logs
+```
+
+## Log format for ML Training
+ML bot will train on .jsonl files where each line is one decision.
+The recommended ML dataset fields:
+| field           | meaning                               |
+| --------------- | ------------------------------------- |
+| `hole`          | 2-card private hand                   |
+| `board`         | visible board cards                   |
+| `pot`           | pot size before action                |
+| `to_call`       | how much needed to call               |
+| `legal`         | formatted bet/call/fold/check options |
+| `stacks`        | chip counts of all players            |
+| `chosen_action` | the target label                      |
+| `folded`        | if player is already folded           |
+| `street`        | preflop / flop / turn / river         |
+| `hand_id`       | join results + decisions              |
+You can load it with Python:
+```bash
+import json
+
+with open("logs/.../hand_12.jsonl") as f:
+    data = [json.loads(line) for line in f]
+```
+
 ## PokerMindBot (SmartBot)
 Located at:
 ```bash

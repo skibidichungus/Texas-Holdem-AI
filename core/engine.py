@@ -166,11 +166,16 @@ class RandomBot:
 class Table:
     def __init__(self, rng: Optional[random.Random] = None):
         self.rng = rng or random.Random(7331)
+        self.hand_counter = 0
 
     def play_hand(self, seats: List[Seat | Dict[str, Any]], small_blind: float, big_blind: float,
                   dealer_index: int, bot_for: Dict[str, BotAdapter], on_event=None) -> Dict[str, float]:
         
         logger = DecisionLogger(enabled=True)
+
+        # NEW — set hand ID
+        logger.start_hand(self.hand_counter)
+        self.hand_counter += 1
 
         # Normalize seats
         seats = [s if isinstance(s, Seat) else Seat(**s) for s in seats]
@@ -281,7 +286,12 @@ class Table:
             for pid in start_chips
         }
 
+        # Log final results for ML training
+        for pid, delta in net.items():
+            logger.log_result(pid, delta)
+
         logger.flush()
+
         return net
 
     def _deal_flop_then_bet(self, *a, **k):
@@ -307,20 +317,18 @@ class Table:
             deck = self._deck
         return deck.pop()
 
-    def _betting_round( self, street, seats, ring, pos_by_pid, hole, board, contrib, pot, bb, bot_for, history, on_event, logger):
-
-        # --- DEBUG: start of round ---
+    def _betting_round(
+        self, street, seats, ring, pos_by_pid, hole, board, contrib, pot, bb,
+        bot_for, history, on_event, logger
+    ):
         print(f"\n=== BETTING ROUND START: {street} ===")
         print(f"Pot before street: {pot:.2f}")
         print("Ring order:", [seats[i].player_id for i in ring])
-        print("Initial contrib:", {pid: float(contrib.get(pid, 0.0)) for pid in contrib})
+        print("Initial contrib:", {s.player_id: float(contrib.get(s.player_id, 0.0)) for s in seats})
 
-        # Ensure contrib has an entry for every seat in this hand
+        # Ensure contrib entries
         if not contrib:
-            contrib = defaultdict(
-                float,
-                {s.player_id: 0.0 for s in seats if not s.is_sitting_out}
-            )
+            contrib = defaultdict(float, {s.player_id: 0.0 for s in seats if not s.is_sitting_out})
         else:
             for s in seats:
                 contrib.setdefault(s.player_id, 0.0)
@@ -328,34 +336,23 @@ class Table:
         folded = defaultdict(bool)
         allin = defaultdict(bool)
 
-        # Track minimum raise size (classic-ish NLHE behavior)
-        # current_bet = max amount anyone has in for this street
         current_bet = max(contrib.values()) if contrib else 0.0
-        # Initial last raise size: at least 1 big blind
         last_raise_size = bb if current_bet > 0 else bb
 
+        # ---- helpers ----
         def num_players_can_act():
-            """How many players are still able to act (not folded, not all-in, chips > 0)."""
             cnt = 0
             for i in ring:
                 s = seats[i]
                 pid = s.player_id
-                if folded[pid]:
-                    continue
-                if allin[pid]:
-                    continue
-                if s.chips <= 0:
+                if folded[pid] or allin[pid] or s.chips <= 0:
                     continue
                 cnt += 1
             return cnt
 
         def all_live_equal():
-            """
-            Are all *active* (not folded, not all-in) players at the same contrib?
-            If 0 or 1 such players, we treat as equal (round should end).
-            """
-            live_pids = []
-            live_contribs = set()
+            live = []
+            contribs = set()
             for i in ring:
                 s = seats[i]
                 pid = s.player_id
@@ -364,77 +361,61 @@ class Table:
                 if allin[pid]:
                     continue
                 if s.chips <= 0:
-                    # Treat zero chips as all-in
                     allin[pid] = True
                     continue
-                live_pids.append(pid)
-                live_contribs.add(float(contrib.get(pid, 0.0)))
-
-            if len(live_pids) <= 1:
+                live.append(pid)
+                contribs.add(float(contrib[pid]))
+            if len(live) <= 1:
                 return True
-            return len(live_contribs) == 1
+            return len(contribs) == 1
 
         idx = 0
         safety = 0
 
-        # --- MAIN LOOP ---
+        # -------- MAIN LOOP ----------
         while True:
             safety += 1
             if safety > 500:
-                print("!!! SAFETY BREAK in betting_round (too many iterations)")
+                print("!!! SAFETY BREAK in betting_round")
                 break
 
-            # If nobody can act, end round
             if num_players_can_act() == 0:
-                print("No players left who can act → ending round")
+                print("No players able to act → ending round")
                 break
 
             si = ring[idx]
             seat = seats[si]
             pid = seat.player_id
 
-            # Skip players who can't act
+            # Skip dead players
             if folded[pid] or allin[pid] or seat.chips <= 0:
                 idx = (idx + 1) % len(ring)
-                # If everyone left is effectively "done", exit
                 if all_live_equal():
-                    print("All live contributions equal → ending round")
+                    print("All live equal → ending street")
                     break
                 continue
 
-            # Recompute current bet & to_call
+            # Recompute current bet / call amount
             current_bet = max(contrib.values()) if contrib else 0.0
-            to_call = max(0.0, current_bet - contrib.get(pid, 0.0))
+            to_call = max(0.0, current_bet - contrib[pid])
 
+            # LEGAL ACTIONS
             legal = []
-
-            # --- LEGAL ACTIONS ---
-
             if to_call <= 1e-9:
-                # No bet to call → player may check or open-bet
                 legal.append({"type": "check"})
                 if seat.chips > 0:
                     min_bet = min(bb, seat.chips)
                     max_bet = seat.chips
                     if max_bet >= min_bet:
-                        legal.append(
-                            {"type": "bet", "min": float(min_bet), "max": float(max_bet)}
-                        )
+                        legal.append({"type": "bet", "min": float(min_bet), "max": float(max_bet)})
             else:
-                # There is a bet to call
                 legal.append({"type": "fold"})
-
-                # Call is always allowed up to your stack
                 call_amt = min(seat.chips, to_call)
                 if call_amt > 0:
                     legal.append({"type": "call"})
-
-                # Raises: classic-ish rule
-                # min total bet for a raise = current_bet + last_raise_size
                 if seat.chips > to_call:
                     max_total = seat.chips + contrib[pid]
                     min_total = current_bet + last_raise_size
-                    # Also at least +bb over current bet
                     min_total = max(min_total, current_bet + bb)
                     if max_total + 1e-9 >= min_total:
                         legal.append({
@@ -443,16 +424,10 @@ class Table:
                             "max": float(max_total),
                         })
 
-            # --- DEBUG: show state before action ---
-            print(
-                f"[{street}] Acting: {pid} | chips={seat.chips:.2f} "
-                f"contrib={contrib[pid]:.2f} to_call={to_call:.2f} "
-                f"pot_now={pot + sum(contrib.values()):.2f}"
-            )
+            print(f"[{street}] Acting: {pid} | chips={seat.chips} contrib={contrib[pid]} to_call={to_call}")
             print("    Legal:", legal)
 
-            # Build PlayerView for the bot
-            # min_raise/max_raise here are "delta over current contrib"
+            # PlayerView
             if to_call <= 1e-9:
                 pv_min_raise = bb
                 pv_max_raise = seat.chips
@@ -472,69 +447,61 @@ class Table:
                 max_raise=pv_max_raise,
                 legal_actions=legal,
                 stacks={seats[i].player_id: seats[i].chips for i in ring},
-                opponents=[
-                    seats[i].player_id for i in ring if seats[i].player_id != pid
-                ],
+                opponents=[seats[i].player_id for i in ring if seats[i].player_id != pid],
                 history=list(history),
             )
 
-            # Get action from bot
+            # BOT ACTION
             raw_action = bot_for[pid].act(view)
 
-            # Log training data
-            logger.log_decision({
-                "player": pid,
-                "street": street,
-                "hole": hole[pid],
-                "board": list(board),
-                "pot": view.pot,
-                "to_call": view.to_call,
-                "legal": view.legal_actions,
-                "chosen_action": {
-                    "type": raw_action.type,
-                    "amount": raw_action.amount,
-                },
-                "stacks": view.stacks,
-                "opponents": view.opponents,
-            })
+            # ---- ML LOGGING (only here, once per actual action) ----
+            if logger is not None:
+                logger.log_decision({
+                    "player": pid,
+                    "street": street,
+                    "hole": hole[pid],
+                    "board": list(board),
+                    "pot": view.pot,
+                    "to_call": to_call,
+                    "legal": view.legal_actions,
+                    "chosen_action": {"type": raw_action.type, "amount": raw_action.amount},
+                    "stacks": view.stacks,
+                    "opponents": view.opponents,
+                    "folded": False,
+                    "hand_id": getattr(self, "hand_index", None)
+                })
 
-            action_type = raw_action.type
-            action_amount = raw_action.amount
-
-            # --- SANITY CHECKS on action type ---
+            # Sanitize illegal action type
             legal_types = {a["type"] for a in legal}
+            action_type = raw_action.type
+            action_amt = raw_action.amount
+
             if action_type not in legal_types:
-                print(f"    [WARN] Bot {pid} chose illegal type '{action_type}', fixing...")
+                print(f"    [WARN] Illegal action '{action_type}', fixing...")
                 if "call" in legal_types:
-                    action_type = "call"
-                    action_amount = None
+                    action_type = "call"; action_amt = None
                 elif "check" in legal_types:
-                    action_type = "check"
-                    action_amount = None
+                    action_type = "check"; action_amt = None
                 else:
-                    action_type = "fold"
-                    action_amount = None
+                    action_type = "fold"; action_amt = None
 
             # Sanitize bet/raise amount
             if action_type in ("bet", "raise"):
-                act_spec = next(a for a in legal if a["type"] == action_type)
-                lo, hi = act_spec["min"], act_spec["max"]
-                if action_amount is None:
-                    action_amount = lo
-                amt = float(action_amount)
-                if amt < lo:
-                    amt = lo
-                if amt > hi:
-                    amt = hi
-                action_amount = amt
+                spec = next(a for a in legal if a["type"] == action_type)
+                lo, hi = spec["min"], spec["max"]
+                if action_amt is None:
+                    action_amt = lo
+                amt = float(action_amt)
+                if amt < lo: amt = lo
+                if amt > hi: amt = hi
+                action_amt = amt
             else:
-                action_amount = None
+                action_amt = None
 
-            action = Action(action_type, action_amount)
+            action = Action(action_type, action_amt)
+            print(f"    Chosen action: {action.type} {action.amount}")
 
-            print(f"    Chosen action: type={action.type}, amount={action.amount}")
-
-            # Add to history
+            # Add to history BEFORE modifying contrib
             history.append({
                 "street": street,
                 "pid": pid,
@@ -543,10 +510,10 @@ class Table:
                 "to_call_before": to_call,
             })
 
-            # --- Apply chosen action ---
+            # APPLY ACTION
             if action.type == "fold":
                 folded[pid] = True
-                hole[pid] = []  # no longer eligible for showdown
+                hole[pid] = []
                 print(f"    {pid} FOLDS")
 
             elif action.type == "call":
@@ -555,20 +522,16 @@ class Table:
                 contrib[pid] += need
                 if seat.chips <= 0:
                     allin[pid] = True
-                print(f"    {pid} CALLS {need:.2f} (chips now {seat.chips:.2f})")
+                print(f"    {pid} CALLS {need}")
 
             elif action.type == "check":
                 print(f"    {pid} CHECKS")
 
             elif action.type in ("bet", "raise"):
-                # Recompute current_bet before this action
-                prev_current_bet = max(contrib.values()) if contrib else 0.0
-
+                prev_bet = max(contrib.values())
                 target_total = float(action.amount or 0.0)
                 need = max(0.0, target_total - contrib[pid])
-
                 if need > seat.chips:
-                    # Clamp to all-in
                     need = seat.chips
                     target_total = contrib[pid] + need
 
@@ -577,39 +540,25 @@ class Table:
                 if seat.chips <= 0:
                     allin[pid] = True
 
-                # Update last_raise_size (classic min-raise logic)
-                new_current_bet = max(contrib.values())
-                if street == "preflop" and prev_current_bet == 0.0:
-                    # First open bet: raise size is the bet itself
-                    last_raise_size = new_current_bet
+                new_bet = max(contrib.values())
+                if street == "preflop" and prev_bet == 0.0:
+                    last_raise_size = new_bet
                 else:
-                    raise_size = new_current_bet - prev_current_bet
-                    if raise_size > 1e-9:
-                        last_raise_size = raise_size
+                    raise_sz = new_bet - prev_bet
+                    if raise_sz > 1e-9:
+                        last_raise_size = raise_sz
 
-                print(
-                    f"    {pid} {action.type.upper()} to {target_total:.2f} "
-                    f"(paid {need:.2f}, chips now {seat.chips:.2f})"
-                )
+                print(f"    {pid} {action.type.upper()} to {target_total} (paid {need})")
 
-            # --- DEBUG: after action ---
-            print("    contrib now:", {
-                seats[i].player_id: float(contrib[seats[i].player_id]) for i in ring
-            })
-
-            # End round if all active players have equal contrib, or nobody can act
             if all_live_equal():
-                print("All live contributions equal after this action → ending round")
+                print("All live equal → ending street")
                 break
-
             if num_players_can_act() == 0:
-                print("No players left who can act after this action → ending round")
+                print("No one left who can act → ending street")
                 break
 
-            # Next player
             idx = (idx + 1) % len(ring)
 
-        # Determine if only one player remains
         alive = [seats[i].player_id for i in ring if not folded[seats[i].player_id]]
         print(f"=== BETTING ROUND END: {street} | Alive: {alive} ===")
 
