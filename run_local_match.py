@@ -1,8 +1,9 @@
 # run_local_match.py
 
 from core.engine import Table, TournamentManager, Seat, InProcessBot
-from bots.poker_mind_bot import PokerMindBot        # Imports smartbot (v1 rn)
+from bots.poker_mind_bot import SmartBot        # Imports smartbot (v1 rn)
 from bots.monte_carlo_bot import MonteCarloBot      # Imports a monte carlo bot
+from bots.ml_bot import MLBot
 
 
 def main():
@@ -18,9 +19,9 @@ def main():
 
     # Use MonteCarloBot
     bots = {
-        "P1": InProcessBot(MonteCarloBot(simulations=300)),
-        "P2": InProcessBot(MonteCarloBot(simulations=300)),
-        "P3": InProcessBot(MonteCarloBot(simulations=300)),
+        "P1": MLBot(),
+        "P2": SmartBot(),
+        "P3": MonteCarloBot(),
     }
 
 

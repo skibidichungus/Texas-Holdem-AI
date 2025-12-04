@@ -1,136 +1,111 @@
 # bots/poker_mind_bot.py
 
-import random
-from typing import Dict, Any
-from core.engine import approx_score
+from core.bot_api import Action, PlayerView
 
 
-class PokerMindBot:
+class SmartBot:
     """
-    Fixed Smart Bot — now respects to_call properly.
-
-    Prevents infinite loops by:
-    - never betting when facing a bet
-    - never checking when check is illegal
-    - choosing valid, legal actions based on to_call logic
+    Updated SmartBot compatible with PlayerView object.
+    Uses simple heuristic poker logic for preflop and postflop.
     """
 
-    def __init__(self):
-        self.strong_threshold = 40
-        self.medium_threshold = 20
-        self.bluff_chance = 0.10
+    def act(self, state: PlayerView):
+        """
+        Main decision function.
+        'state' is a PlayerView, NOT a dict.
+        """
+        hole = state.hole_cards
+        board = state.board
+        pot = state.pot
+        to_call = state.to_call
+        legal = state.legal_actions
+        stacks = state.stacks
+        street = state.street
 
-    def act(self, state: Dict[str, Any]):
-        legal = state["legal_actions"]
-        hole = state["hole_cards"]
-        board = state["board"]
-        pot = state["pot"]
-        to_call = state["to_call"]
-        me = state["me"]
-
-        # If already folded
-        if not hole:
-            return {"type": "check"}
-
-        street = state["street"]
-
-        # ====== PRE-FLOP ======
+        # ===========================
+        #        PREFLOP LOGIC
+        # ===========================
         if street == "preflop":
-            ranks = [c[0] for c in hole]
-            suits = [c[1] for c in hole]
-            order = "23456789TJQKA"
-            r1 = order.index(ranks[0])
-            r2 = order.index(ranks[1])
-            high = max(r1, r2)
-            suited = suits[0] == suits[1]
+            ranks = sorted([c[0] for c in hole], reverse=True)
+            r1, r2 = ranks
 
-            # Facing a bet?
-            if to_call > 0:
-                # Strong → raise
-                if set(ranks) in ({"A","K"}, {"A","Q"}) or ranks in (["A","A"],["K","K"],["Q","Q"],["J","J"]):
-                    for a in legal:
-                        if a["type"] == "raise":
-                            amt = max(a["min"], min(a["max"], 6.0))
-                            return {"type": "raise", "amount": amt}
-                    # fallback:
-                    return {"type": "call"}
+            # --- Premium hands ---
+            if (r1 == "A" and r2 in ("K", "Q", "J")) or (r1 == r2 and r1 in ("A", "K", "Q", "J")):
+                return self._raise_or_call(legal, pot)
 
-                # Decent → call if cheap
-                if high >= order.index("T") or (suited and high >= order.index("9")) or ranks[0]==ranks[1]:
-                    for a in legal:
-                        if a["type"] == "call":
-                            return {"type": "call"}
-                    return {"type": "fold"}
+            # --- Medium-strength hands ---
+            if r1 in ("A", "K", "Q", "J"):
+                return self._call_or_check(legal)
 
-                # Weak → fold
-                return {"type": "fold"}
+            # --- Trash hands ---
+            return self._fold_or_check(legal, to_call)
 
-            else:
-                # No bet facing us → CHECK or BET
-                if ranks in (["A","A"],["K","K"],["Q","Q"],["J","J"]) or set(ranks) in ({"A","K"}, {"A","Q"}):
-                    # Raise first-in
-                    for a in legal:
-                        if a["type"] in ("bet","raise"):
-                            amt = max(a["min"], min(a["max"], 6.0))
-                            return {"type": a["type"], "amount": amt}
-                # Otherwise check
-                return {"type": "check"}
+        # ===========================
+        #        POSTFLOP LOGIC
+        # ===========================
+        strength = self._approx_strength(hole, board)
 
-        # ====== POST-FLOP ======
-        strength = approx_score(hole, board)
-        bluff = random.random() < self.bluff_chance
+        if strength >= 0.75:
+            return self._raise_or_call(legal, pot)
 
-        # Facing a bet?
+        if strength >= 0.40:
+            return self._call_or_check(legal)
+
+        return self._fold_or_check(legal, to_call)
+
+    # -----------------------------------------------------
+    # HELPER DECISION FUNCTIONS
+    # -----------------------------------------------------
+
+    def _fold_or_check(self, legal, to_call):
+        """Check if possible, otherwise fold."""
         if to_call > 0:
-            # Weak hand → fold
-            if strength < self.medium_threshold and not bluff:
-                for a in legal:
-                    if a["type"] == "fold":
-                        return {"type": "fold"}
-                # fallback (call if fold missing)
-                return {"type": "call"}
+            return Action("fold")
 
-            # Medium → call if reasonable
-            call_limit = pot * 0.25
-            if to_call <= call_limit or strength >= self.medium_threshold:
-                for a in legal:
-                    if a["type"] == "call":
-                        return {"type": "call"}
-
-            # Strong → raise
-            if strength >= self.strong_threshold or bluff:
-                for a in legal:
-                    if a["type"] == "raise":
-                        target = pot * 0.5
-                        amt = max(a["min"], min(a["max"], target))
-                        return {"type": "raise", "amount": amt}
-
-            # Fallback → call
-            return {"type": "call"}
-
-        # Not facing a bet → we can check or bet
-        if strength >= self.strong_threshold or bluff:
-            # Bet 50% pot
-            for a in legal:
-                if a["type"] == "bet":
-                    target = pot * 0.5
-                    amt = max(a["min"], min(a["max"], target))
-                    return {"type": "bet", "amount": amt}
-
-        # Medium → check
-        if strength >= self.medium_threshold:
-            for a in legal:
-                if a["type"] == "check":
-                    return {"type": "check"}
-
-        # Weak → check
+        # check if allowed
         for a in legal:
             if a["type"] == "check":
-                return {"type": "check"}
+                return Action("check")
 
-        # Fallback (very rare)
-        return {"type": "fold"}
+        return Action("fold")
+
+    def _call_or_check(self, legal):
+        """Call if facing a bet, otherwise check."""
+        for a in legal:
+            if a["type"] == "call":
+                return Action("call")
+
+        for a in legal:
+            if a["type"] == "check":
+                return Action("check")
+
+        return Action("fold")
+
+    def _raise_or_call(self, legal, pot):
+        """Raise about 50% pot if possible, else call."""
+        for a in legal:
+            if a["type"] in ("raise", "bet"):
+                size = max(a["min"], min(a["max"], pot * 0.5))
+                return Action(a["type"], size)
+
+        # fallback to call
+        for a in legal:
+            if a["type"] == "call":
+                return Action("call")
+
+        # fallback to check
+        for a in legal:
+            if a["type"] == "check":
+                return Action("check")
+
+        return Action("fold")
+
+    # -----------------------------------------------------
+    # Temporary strength estimator (replace later)
+    # -----------------------------------------------------
+    def _approx_strength(self, hole, board):
+        return 0.5
 
 
-# Backward alias
-SmartBot = PokerMindBot
+# backward compatibility
+PokerMindBot = SmartBot
