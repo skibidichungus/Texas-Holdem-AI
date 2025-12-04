@@ -1,15 +1,20 @@
-# Logs (never commit)
+# Logs (training data)
 logs/
 
-# Python caches
+# ML model weights
+bots/models/*.pt
+bots/models/*.pkl
+
+# Python caching
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
 
-# ML experimental stuff (not ready yet)
-bots/ml_bot.py
-bots/train_ml_bot.py
-bots/data/
-bots/models/
-
-# Mac junk
+# System files
 .DS_Store
+
+# Virtual environments
+venv/
+.env/
+.env/*

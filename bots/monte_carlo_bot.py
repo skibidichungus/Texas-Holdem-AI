@@ -1,177 +1,155 @@
 import random
-from typing import Dict, Any, List
-from core.engine import approx_score, full_deck
+from core.bot_api import Action, PlayerView
+from core.engine import approx_score
 
 
 class MonteCarloBot:
     """
-    Monte Carlo rollout bot:
-    - Simulates random future boards
-    - Estimates win probability vs random opponent hands
-    - Acts using EV-aware policy
+    Monte Carlo rollout bot updated to work with PlayerView objects.
     """
 
-    def __init__(self, simulations=300):
+    def __init__(self, simulations=200):
         self.simulations = simulations
-        self.bluff_chance = 0.05  # small random bluff chance
 
-    # --------------------------------------------------------
-    # UTILITY: sample opponents' hole cards
-    # --------------------------------------------------------
-    def _sample_opponent_holes(self, used_cards, num_opponents):
-        deck = [c for c in full_deck() if c not in used_cards]
-        random.shuffle(deck)
-        return [ [deck.pop(), deck.pop()] for _ in range(num_opponents) ]
-
-    # --------------------------------------------------------
-    # UTILITY: finish board to 5 cards
-    # --------------------------------------------------------
-    def _sample_future_board(self, used_cards, board):
-        deck = [c for c in full_deck() if c not in used_cards]
-        random.shuffle(deck)
-
-        missing = 5 - len(board)
-        return board + [deck.pop() for _ in range(missing)]
-
-    # --------------------------------------------------------
-    # CORE MONTE CARLO SIMULATION
-    # --------------------------------------------------------
-    def estimate_winrate(self, hole, board, num_opponents):
-        used = set(hole + board)
-
-        wins = 0
-        ties = 0
-
-        for _ in range(self.simulations):
-            # Sample other players' hands
-            opp_hands = self._sample_opponent_holes(used, num_opponents)
-
-            # Sample full board
-            sim_board = self._sample_future_board(used | set(sum(opp_hands, [])), board)
-
-            # Score my hand
-            my_score = approx_score(hole, sim_board)
-
-            # Score all opponents
-            opp_scores = [
-                approx_score(h, sim_board) for h in opp_hands
-            ]
-
-            # Compare
-            if my_score > max(opp_scores):
-                wins += 1
-            elif my_score == max(opp_scores):
-                ties += 1
-
-        return (wins + ties * 0.5) / self.simulations
-
-    # --------------------------------------------------------
+    # ----------------------------------------------------
     # PUBLIC: act() for engine compatibility
-    # --------------------------------------------------------
-    def act(self, state: Dict[str, Any]):
-        legal = state["legal_actions"]
-        hole = state["hole_cards"]
-        board = state["board"]
-        pot = state["pot"]
-        to_call = state["to_call"]
-        me = state["me"]
-        opponents = state["opponents"]
+    # ----------------------------------------------------
+    def act(self, state: PlayerView):
+        hole = state.hole_cards
+        board = state.board
+        pot = state.pot
+        to_call = state.to_call
+        legal = state.legal_actions
+        street = state.street
+        opponents = state.opponents
 
+        # If no hole cards (folded)
         if not hole:
-            return self._sanitize({"type": "check"}, legal)
+            for a in legal:
+                if a["type"] == "check":
+                    return Action("check")
+            return Action("fold")
 
-        # Monte Carlo estimate
-        winrate = self.estimate_winrate(hole, board, len(opponents))
-
-        # Bluff
-        if random.random() < self.bluff_chance:
-            winrate += 0.15
-
-        pot_odds = to_call / (pot + to_call) if to_call > 0 else 0
-        call_threshold = pot_odds
-        raise_threshold = 0.60
+        # Monte Carlo equity estimate
+        winrate = self._estimate_equity(hole, board, sims=self.simulations)
 
         # -----------------------------
         # FACING A BET
         # -----------------------------
         if to_call > 0:
+            pot_odds = to_call / (pot + to_call)
 
-            # Fold if losing
-            if winrate < call_threshold:
-                return self._sanitize({"type": "fold"}, legal)
+            # Weak hand → fold
+            if winrate < pot_odds:
+                return self._choose("fold", legal)
 
-            # Call if decent
-            if winrate < raise_threshold:
-                return self._sanitize({"type": "call"}, legal)
+            # Medium hand → call
+            if winrate < 0.60:
+                return self._choose("call", legal)
 
-            # Raise if strong > 60%
-            for a in legal:
-                if a["type"] == "raise":
-                    target = pot * 0.75
-                    amt = max(a["min"], min(a["max"], target))
-                    return self._sanitize({"type": "raise", "amount": round(amt, 2)}, legal)
-
-            return self._sanitize({"type": "call"}, legal)
+            # Strong → raise
+            return self._raise(pot, legal)
 
         # -----------------------------
-        # NO ONE BET YET
+        # NO BET YET
         # -----------------------------
         if winrate > 0.65:
-            for a in legal:
-                if a["type"] == "bet":
-                    target = pot * 0.5
-                    amt = max(a["min"], min(a["max"], target))
-                    return self._sanitize({"type": "bet", "amount": round(amt, 2)}, legal)
+            return self._bet(pot, legal)
 
-        # Check if possible
+        # Medium → check
         for a in legal:
             if a["type"] == "check":
-                return self._sanitize({"type": "check"}, legal)
+                return Action("check")
 
         # fallback
-        return self._sanitize({"type": "fold"}, legal)
+        return self._choose("fold", legal)
 
-    def _sanitize(self, choice, legal_actions):
-        desired_type = choice["type"]
-        desired_amount = choice.get("amount", None)
+    # ----------------------------------------------------
+    # Monte Carlo equity estimation
+    # ----------------------------------------------------
+    def _estimate_equity(self, hole, board, sims=200):
+        wins = 0
+        ties = 0
 
-        # Filter legal actions that match this type
-        same_type = [a for a in legal_actions if a["type"] == desired_type]
+        for _ in range(sims):
+            opp = self._random_opponent_hand(hole, board)
+            full_board = self._random_board(board, hole, opp)
 
-        if not same_type:
-            # Desired action type not allowed → fallback
-            # 1. Prefer call
-            calls = [a for a in legal_actions if a["type"] == "call"]
-            if calls:
-                return {"type": "call", "amount": None}
+            my_score = approx_score(hole, full_board)
+            opp_score = approx_score(opp, full_board)
 
-            # 2. Then check
-            checks = [a for a in legal_actions if a["type"] == "check"]
-            if checks:
-                return {"type": "check", "amount": None}
+            if my_score > opp_score:
+                wins += 1
+            elif my_score == opp_score:
+                ties += 1
 
-            # 3. Otherwise fold if legal
-            folds = [a for a in legal_actions if a["type"] == "fold"]
-            if folds:
-                return {"type": "fold", "amount": None}
+        return (wins + ties * 0.5) / sims
 
-            # 4. LAST RESORT: choose first legal action
-            a = legal_actions[0]
-            return {"type": a["type"], "amount": a.get("min")}
+    # ----------------------------------------------------
+    # Randomize opponent hole cards
+    # ----------------------------------------------------
+    def _random_opponent_hand(self, hole, board):
+        deck = self._remaining_deck(hole, board)
+        return random.sample(deck, 2)
 
-        a = same_type[0]
+    # ----------------------------------------------------
+    # Complete the board to 5 cards randomly
+    # ----------------------------------------------------
+    def _random_board(self, board, hole, opp):
+        deck = self._remaining_deck(hole, board, opp)
+        need = 5 - len(board)
+        cards = random.sample(deck, need)
+        return board + cards
 
-        # Bet/Raise: clamp amount
-        if a["type"] in ("bet", "raise"):
-            # If Monte Carlo didn't supply amount → default min
-            if desired_amount is None:
-                amt = a["min"]
-            else:
-                amt = max(a["min"], min(desired_amount, a["max"]))
-            return {"type": a["type"], "amount": round(amt, 2)}
+    # ----------------------------------------------------
+    # Remaining deck helper
+    # ----------------------------------------------------
+    def _remaining_deck(self, hole, board, opp=None):
+        ranks = "23456789TJQKA"
+        suits = "cdhs"
 
-        # fold, call, check
-        return {"type": a["type"], "amount": None}
+        full = [(r, s) for r in ranks for s in suits]
 
-# Backwards-compat alias
+        used = set(tuple(c) for c in hole)
+        used |= set(tuple(c) for c in board)
+        if opp:
+            used |= set(tuple(c) for c in opp)
+
+        return [c for c in full if c not in used]
+
+    # ----------------------------------------------------
+    # Helper: choose legal action
+    # ----------------------------------------------------
+    def _choose(self, typ, legal):
+        for a in legal:
+            if a["type"] == typ:
+                return Action(typ)
+        # fallback if that action type isn't available
+        for a in legal:
+            if a["type"] in ("call", "check"):
+                return Action(a["type"])
+        return Action("fold")
+
+    # ----------------------------------------------------
+    # Raise helper
+    # ----------------------------------------------------
+    def _raise(self, pot, legal):
+        for a in legal:
+            if a["type"] == "raise":
+                amt = max(a["min"], min(a["max"], pot * 0.75))
+                return Action("raise", round(amt, 2))
+        return self._choose("call", legal)
+
+    # ----------------------------------------------------
+    # Bet helper
+    # ----------------------------------------------------
+    def _bet(self, pot, legal):
+        for a in legal:
+            if a["type"] == "bet":
+                amt = max(a["min"], min(a["max"], pot * 0.5))
+                return Action("bet", round(amt, 2))
+        return self._choose("check", legal)
+
+
+# Backwards alias
 SmartBot = MonteCarloBot
