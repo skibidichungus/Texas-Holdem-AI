@@ -22,3 +22,6 @@ __pycache__/
 venv/
 .env/
 .env/*
+
+# Generated tournament charts
+tournament_progress.png

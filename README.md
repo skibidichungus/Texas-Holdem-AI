@@ -46,14 +46,19 @@ Texas Hold'em Bot/
 ```
 
 ## How to Run
-Make sure you are in the project root:
-```bash
+
+### Tournament Mode (Play Until One Winner)
+The default mode now runs a tournament until only one player remains:
 python3 run_local_match.py
-```
-or specify number of hands:
-```bash
-python3 run_local_match.py --hands 50
-```
+This will:
+- Play hands until one player has all the chips
+- Display real-time chip stacks after each hand
+- Generate a visualization chart showing tournament progress
+- Save the chart as `tournament_progress.png`
+
+### Fixed Number of Hands (Legacy)
+If you want to play a fixed number of hands, you can modify `run_local_match.py` to use:
+tm.run(seats=seats, bot_for=bots, small_blind=1, big_blind=2, hands=20)---
 
 You can swap which bots are used inside run_local_match.py.
 
