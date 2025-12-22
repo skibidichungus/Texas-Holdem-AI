@@ -165,11 +165,34 @@ class PokerDataset(Dataset):
                     hero_stack = float(stacks[me])
                     eff_stack = min(float(v) for v in stacks.values())
                     n_players = len([v for v in stacks.values() if v > 0])
+                    
+                    # NEW FEATURES: Hand strength, pot odds, position
+                    # Hand strength
+                    if hole and len(hole) >= 2:
+                        from core.engine import approx_score
+                        score = approx_score(hole, board)
+                        hand_strength = min(1.0, score / 400.0)
+                    else:
+                        hand_strength = 0.0
+                    
+                    # Pot odds
+                    if pot + to_call > 0:
+                        pot_odds = to_call / (pot + to_call)
+                    else:
+                        pot_odds = 0.0
+                    
+                    # Position encoding
+                    position_order = {
+                        "UTG": 0.0, "UTG+1": 0.1, "MP": 0.3, "LJ": 0.4,
+                        "HJ": 0.6, "CO": 0.8, "BTN": 1.0, "SB": 0.7, "BB": 0.5
+                    }
+                    position = row.get("position", "MP")  # Default to MP if missing
+                    position_value = position_order.get(position, 0.5)
 
                     features = [
                         street, pot, to_call,
                         hero_stack, eff_stack, n_players
-                    ] + hole_enc + board_enc
+                    ] + hole_enc + board_enc + [hand_strength, pot_odds, position_value]  # +3 features
 
                     self.samples.append(
                         (
@@ -292,7 +315,7 @@ if __name__ == "__main__":
     print(f"Training samples: {train_size}  |  Validation samples: {val_size}")
 
     sample_x, _ = dataset[0]
-    input_size = sample_x.shape[0]
+    input_size = sample_x.shape[0]  # Will be 23 now
 
     model = PokerMLP(input_dim=input_size, hidden=128, num_classes=6)
 

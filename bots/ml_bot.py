@@ -26,20 +26,41 @@ class MLBot:
     def __init__(self, model_path="bots/models/ml_model.pt", device="cpu", use_fallback=True):
         self.device = device
         self.use_fallback = use_fallback
-        self.model = PokerMLP(input_dim=20, hidden=128, num_classes=6)
+        self.model = PokerMLP(input_dim=23, hidden=128, num_classes=6)
         self.model_trained = False
         try:
-            self.model.load_state_dict(torch.load(model_path, map_location=device))
-            self.model.eval()
-            self.model_trained = True
-        except (FileNotFoundError, OSError) as e:
+            checkpoint = torch.load(model_path, map_location=device)
+            # Check if model dimensions match
+            first_layer_weight = checkpoint.get('net.0.weight', None)
+            if first_layer_weight is not None:
+                expected_input_dim = first_layer_weight.shape[1]
+                if expected_input_dim == 20:
+                    # Old model with 20 features - can't use it
+                    print(f"Warning: Model file has old 20-feature format. Need to retrain with 23 features.")
+                    print("Using fallback strategy until model is retrained.")
+                    self.model_trained = False
+                elif expected_input_dim == 23:
+                    # New model with 23 features - load it
+                    self.model.load_state_dict(checkpoint)
+                    self.model.eval()
+                    self.model_trained = True
+                else:
+                    print(f"Warning: Model has unexpected input dimension {expected_input_dim}. Using fallback.")
+                    self.model_trained = False
+            else:
+                # Try loading anyway
+                self.model.load_state_dict(checkpoint)
+                self.model.eval()
+                self.model_trained = True
+        except (FileNotFoundError, OSError, RuntimeError) as e:
             print(f"Warning: Could not load model from {model_path}: {e}")
             print("Using untrained model (random weights).")
             self.model.eval()
 
     def _make_features(self, state):
         """
-        Produce EXACT 20-DIM feature vector like training.
+        Produce feature vector with hand strength, pot odds, and position.
+        Now 23 dimensions: 20 original + 3 new features
         """
         # Handle both PlayerView and dict
         if isinstance(state, dict):
@@ -76,12 +97,34 @@ class MLBot:
         hero_stack = float(stacks[me])
         eff_stack = min(float(v) for v in stacks.values())
         n_players = len([v for v in stacks.values() if v > 0])
+        
+        # NEW FEATURES: Hand strength, pot odds, position
+        # Hand strength
+        if hole and len(hole) >= 2:
+            score = approx_score(hole, board)
+            hand_strength = min(1.0, score / 400.0)  # Normalize to 0-1
+        else:
+            hand_strength = 0.0
+        
+        # Pot odds
+        if pot + to_call > 0:
+            pot_odds = to_call / (pot + to_call)
+        else:
+            pot_odds = 0.0
+        
+        # Position encoding (0.0 = early/tight, 1.0 = late/loose)
+        position_order = {
+            "UTG": 0.0, "UTG+1": 0.1, "MP": 0.3, "LJ": 0.4,
+            "HJ": 0.6, "CO": 0.8, "BTN": 1.0, "SB": 0.7, "BB": 0.5
+        }
+        position_value = position_order.get(state.position, 0.5)
 
-        # FULL 20-feature vector
+        # FULL 23-feature vector (was 20, now +3)
         features = (
             [street, pot, to_call, hero_stack, eff_stack, n_players]
             + hole_enc
             + board_enc
+            + [hand_strength, pot_odds, position_value]  # NEW FEATURES
         )
 
         x = torch.tensor(features, dtype=torch.float32).unsqueeze(0)

@@ -22,6 +22,7 @@ class MonteCarloBot:
         legal = state.legal_actions
         street = state.street
         opponents = state.opponents
+        position = state.position
 
         # If no hole cards (folded)
         if not hole:
@@ -32,19 +33,32 @@ class MonteCarloBot:
 
         # Monte Carlo equity estimate
         winrate = self._estimate_equity(hole, board, sims=self.simulations)
+        
+        # Position awareness: adjust thresholds based on position
+        position_tightness = self._get_position_tightness(position)
+        
+        # Adjust winrate thresholds: play tighter in early position
+        # Early position: need higher winrate to bet/raise
+        # Late position: can bet/raise with lower winrate
+        if position_tightness > 0.5:  # Early position
+            bet_threshold = 0.70
+            raise_threshold = 0.65
+        else:  # Late position
+            bet_threshold = 0.60
+            raise_threshold = 0.55
 
         # -----------------------------
         # FACING A BET
         # -----------------------------
         if to_call > 0:
-            pot_odds = to_call / (pot + to_call)
+            pot_odds = to_call / (pot + to_call) if (pot + to_call) > 0 else 0.5
 
             # Weak hand → fold
             if winrate < pot_odds:
                 return self._choose("fold", legal)
 
             # Medium hand → call
-            if winrate < 0.60:
+            if winrate < raise_threshold:
                 return self._choose("call", legal)
 
             # Strong → raise
@@ -53,7 +67,7 @@ class MonteCarloBot:
         # -----------------------------
         # NO BET YET
         # -----------------------------
-        if winrate > 0.65:
+        if winrate > bet_threshold:
             return self._bet(pot, legal)
 
         # Medium → check
@@ -149,6 +163,16 @@ class MonteCarloBot:
                 amt = max(a["min"], min(a["max"], pot * 0.5))
                 return Action("bet", round(amt, 2))
         return self._choose("check", legal)
+
+    def _get_position_tightness(self, position):
+        """
+        Returns position tightness factor: 1.0 = early (tight), 0.0 = late (loose)
+        """
+        position_order = {
+            "UTG": 1.0, "UTG+1": 0.9, "MP": 0.7, "LJ": 0.6,
+            "HJ": 0.4, "CO": 0.2, "BTN": 0.0, "SB": 0.3, "BB": 0.5
+        }
+        return position_order.get(position, 0.5)
 
 
 # Backwards alias
