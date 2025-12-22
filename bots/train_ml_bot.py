@@ -1,8 +1,14 @@
 import os
+import sys
 import json
 import glob
 import torch
 from torch.utils.data import Dataset, DataLoader
+
+# Add project root to path so imports work
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, project_root)
+
 from bots.models.poker_mlp import PokerMLP
 
 import torch.nn as nn
@@ -252,6 +258,7 @@ def train_model(
 
 if __name__ == "__main__":
     import argparse
+    import sys
     from torch.utils.data import DataLoader, random_split
 
     parser = argparse.ArgumentParser()
@@ -272,7 +279,7 @@ if __name__ == "__main__":
     if len(dataset) == 0:
         print(f"Error: No training data found in {args.log_dir}")
         print("Please run some games first to generate logs.")
-        return
+        sys.exit(1)  # Changed from 'return' to 'sys.exit(1)'
 
     # 90% training / 10% validation
     val_size = max(1, int(0.10 * len(dataset)))

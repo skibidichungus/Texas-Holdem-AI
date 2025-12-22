@@ -23,12 +23,15 @@ STREET_MAP = {"preflop":0, "flop":1, "turn":2, "river":3}
 # ML BOT -------------------------------------------------------------
 
 class MLBot:
-    def __init__(self, model_path="bots/models/ml_model.pt", device="cpu"):
+    def __init__(self, model_path="bots/models/ml_model.pt", device="cpu", use_fallback=True):
         self.device = device
+        self.use_fallback = use_fallback
         self.model = PokerMLP(input_dim=20, hidden=128, num_classes=6)
+        self.model_trained = False
         try:
             self.model.load_state_dict(torch.load(model_path, map_location=device))
             self.model.eval()
+            self.model_trained = True
         except (FileNotFoundError, OSError) as e:
             print(f"Warning: Could not load model from {model_path}: {e}")
             print("Using untrained model (random weights).")
@@ -38,6 +41,13 @@ class MLBot:
         """
         Produce EXACT 20-DIM feature vector like training.
         """
+        # Handle both PlayerView and dict
+        if isinstance(state, dict):
+            class DictView:
+                def __init__(self, d):
+                    for k, v in d.items():
+                        setattr(self, k, v)
+            state = DictView(state)
 
         hole = state.hole_cards
         board = state.board
@@ -46,6 +56,9 @@ class MLBot:
         hole_enc = []
         for c in hole:
             hole_enc += encode_card(c)   # 4 numbers
+        # Pad to 4 numbers if missing (player folded)
+        while len(hole_enc) < 4:
+            hole_enc.append(0)
 
         # ---- Encode board ----
         board_enc = []
@@ -74,11 +87,33 @@ class MLBot:
         x = torch.tensor(features, dtype=torch.float32).unsqueeze(0)
         return x.to(self.device)
 
+    def _estimate_hand_strength(self, hole, board):
+        """Quick hand strength estimate for fallback."""
+        if not hole or len(hole) < 2:
+            return 0.0
+        # Simple approximation using approx_score
+        score = approx_score(hole, board)
+        # Normalize roughly (this is approximate)
+        return min(1.0, score / 500.0)
+
     # ----------------------------------------------------------
     # ACT ------------------------------------------------------
     # ----------------------------------------------------------
     def act(self, state):
+        # Handle both PlayerView objects and dicts (from InProcessBot adapter)
+        if isinstance(state, dict):
+            # Convert dict to PlayerView-like access
+            class DictView:
+                def __init__(self, d):
+                    for k, v in d.items():
+                        setattr(self, k, v)
+            state = DictView(state)
+        
         legal = state.legal_actions
+
+        # If model not trained and fallback enabled, use fallback
+        if not self.model_trained and self.use_fallback:
+            return self._fallback_strategy(state)
 
         # Build 20-dim features
         x = self._make_features(state)
@@ -86,6 +121,14 @@ class MLBot:
         # Predict class
         logits = self.model(x)
         pred = int(logits.argmax(dim=1).item())
+        
+        # Get confidence (softmax probability)
+        probs = torch.softmax(logits, dim=1)[0]
+        confidence = float(probs[pred].item())
+
+        # If low confidence and fallback enabled, use fallback
+        if self.use_fallback and confidence < 0.3:
+            return self._fallback_strategy(state)
 
         # -------- handle buckets --------
         if pred == 0:
@@ -126,3 +169,38 @@ class MLBot:
         amt = lo + (hi - lo) * (bucket / 2)   # 3 buckets
 
         return Action(a["type"], round(amt, 2))
+
+    def _fallback_strategy(self, state):
+        """Fallback to simple hand strength logic when model is untrained."""
+        # Handle both PlayerView and dict
+        if isinstance(state, dict):
+            class DictView:
+                def __init__(self, d):
+                    for k, v in d.items():
+                        setattr(self, k, v)
+            state = DictView(state)
+            
+        hole = state.hole_cards
+        board = state.board
+        pot = state.pot
+        to_call = state.to_call
+        legal = state.legal_actions
+
+        if not hole:
+            return self._choose("fold", legal)
+
+        strength = self._estimate_hand_strength(hole, board)
+
+        # Facing a bet
+        if to_call > 0:
+            pot_odds = to_call / (pot + to_call) if (pot + to_call) > 0 else 0.5
+            if strength < pot_odds:
+                return self._choose("fold", legal)
+            if strength < 0.55:
+                return self._choose("call", legal)
+            return self._raise(pot, legal)
+
+        # No bet yet
+        if strength > 0.60:
+            return self._bet(pot, legal)
+        return self._choose("check", legal)

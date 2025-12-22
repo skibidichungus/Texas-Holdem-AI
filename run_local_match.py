@@ -1,6 +1,7 @@
 # run_local_match.py
 
 from core.engine import Table, TournamentManager, Seat, InProcessBot
+from core.bot_api import BotAdapter, PlayerView, Action  # Add Action import
 from bots.poker_mind_bot import SmartBot
 from bots.monte_carlo_bot import MonteCarloBot
 from bots.ml_bot import MLBot
@@ -45,7 +46,24 @@ def run_tournament_until_winner(seats, bots, small_blind, big_blind):
         
         # Only include active players in the hand
         active_seats = [s for s in seats if s.chips > 0]
-        active_bots = {s.player_id: InProcessBot(bots[s.player_id]) for s in active_seats}
+        
+        # Create bot adapters
+        # MLBot needs InProcessBot (converts PlayerView to dict)
+        # SmartBot and MonteCarloBot already accept PlayerView, so use a pass-through adapter
+        class PlayerViewAdapter(BotAdapter):
+            def __init__(self, bot):
+                self.bot = bot
+            def act(self, view: PlayerView) -> Action:
+                return self.bot.act(view)
+        
+        active_bots = {}
+        for s in active_seats:
+            bot = bots[s.player_id]
+            if isinstance(bot, MLBot):
+                active_bots[s.player_id] = InProcessBot(bot)
+            else:
+                # SmartBot and MonteCarloBot already accept PlayerView
+                active_bots[s.player_id] = PlayerViewAdapter(bot)
         
         # Play hand
         res = table.play_hand(
@@ -113,7 +131,7 @@ def plot_tournament_progress(chip_history, player_ids):
 
 def main():
     # 3-player demo table with 200 chips each
-    seats = [Seat(player_id=f"P{i+1}", chips=200) for i in range(3)]
+    seats = [Seat(player_id=f"P{i+1}", chips=1000) for i in range(3)]
     player_ids = [s.player_id for s in seats]
     
     # Set up bots
