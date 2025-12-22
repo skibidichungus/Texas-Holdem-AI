@@ -37,7 +37,7 @@ def run_tournament_until_winner(seats, bots, small_blind, big_blind):
         if len(active_players) <= 1:
             winner = active_players[0].player_id if active_players else None
             if winner:
-                print(f"\n🏆 TOURNAMENT OVER! Winner: {winner}")
+                print(f"\nTOURNAMENT OVER! Winner: {winner}")
             break
         
         # Play one hand
@@ -89,7 +89,7 @@ def run_tournament_until_winner(seats, bots, small_blind, big_blind):
         
         # Safety limit (prevent infinite loops)
         if hand_count > 10000:
-            print("⚠️  Safety limit reached (10,000 hands). Stopping.")
+            print("Safety limit reached (10,000 hands). Stopping.")
             break
     
     return chip_history, hand_count
@@ -123,7 +123,7 @@ def plot_tournament_progress(chip_history, player_ids):
     
     # Save the plot
     plt.savefig('tournament_progress.png', dpi=150, bbox_inches='tight')
-    print(f"\n📊 Chart saved as 'tournament_progress.png'")
+    print(f"\nChart saved as 'tournament_progress.png'")
     
     # Show the plot
     plt.show()
@@ -131,7 +131,7 @@ def plot_tournament_progress(chip_history, player_ids):
 
 def main():
     # 3-player demo table with 200 chips each
-    seats = [Seat(player_id=f"P{i+1}", chips=1000) for i in range(3)]
+    seats = [Seat(player_id=f"P{i+1}", chips=500) for i in range(3)]
     player_ids = [s.player_id for s in seats]
     
     # Set up bots
@@ -156,7 +156,7 @@ def main():
     print(f"Total hands played: {total_hands}")
     print("\nFinal stacks:")
     for s in seats:
-        status = "🏆 WINNER" if s.chips > 0 else "❌ Eliminated"
+        status = "WINNER" if s.chips > 0 else "Eliminated"
         print(f"  {s.player_id}: {s.chips:.2f} chips - {status}")
     
     # Create visualization
