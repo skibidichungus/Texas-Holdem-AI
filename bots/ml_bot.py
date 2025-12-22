@@ -26,8 +26,13 @@ class MLBot:
     def __init__(self, model_path="bots/models/ml_model.pt", device="cpu"):
         self.device = device
         self.model = PokerMLP(input_dim=20, hidden=128, num_classes=6)
-        self.model.load_state_dict(torch.load(model_path, map_location=device))
-        self.model.eval()
+        try:
+            self.model.load_state_dict(torch.load(model_path, map_location=device))
+            self.model.eval()
+        except (FileNotFoundError, OSError) as e:
+            print(f"Warning: Could not load model from {model_path}: {e}")
+            print("Using untrained model (random weights).")
+            self.model.eval()
 
     def _make_features(self, state):
         """

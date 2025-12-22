@@ -12,6 +12,14 @@ A fully functional **Texas Hold’em poker engine** featuring:
 
 All engines support logging, replaying, and future ML training.
 
+## Requirements
+- Python 3.7+
+- PyTorch (for MLBot training and inference)
+- Standard library only (no other external dependencies)
+
+Install PyTorch:
+pip install torch---
+
 ---
 
 ## Project Structure
@@ -176,26 +184,23 @@ bots/monte_carlo_bot.py
 ```
 
 ## MLBot (Neural Bot)
-- Uses a PyTorch MLP classifer
-- Loads models weights from:
+- Uses a PyTorch MLP classifier
+- Loads model weights from:
 ```bash
 bots/models/ml_model.pt
 ```
-If the model file is missing, the bot still runs using a fallback safe policy, and game continues normally.
+**Note**: If the model file is missing, the bot will use an untrained model (random weights) and continue running normally. This allows you to test the bot before training.
 
 ### Train the ML Model
 ```bash
-python3 bots/models/train_ml_bot.py --log_dir logs --epochs 8
+python3 bots/train_ml_bot.py --log_dir logs --epochs 8
 ```
-A new model will be saved automatically.
+A new model will be saved automatically. Make sure you have some game logs in the `logs/` directory first.
 
 ### How it works:
-- Simulates random future boards
-- Estimates win-rate by rolling out 200–500 trials
-- Chooses the action with the best expected value
-- Adapts to board texture, number of players, stack depth
-- Handles all legal bet/call/raise options
-Note: strongest bot so far...
+- Uses a 20-dimensional feature vector (street, pot, stacks, hole cards, board)
+- Predicts one of 6 action classes: fold, check, call, raise_small, raise_medium, raise_large
+- Trained on logged game decisions from previous matches
 
 ## About the Engine
 Located in:

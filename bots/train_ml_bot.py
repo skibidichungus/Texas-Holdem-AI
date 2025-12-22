@@ -221,7 +221,7 @@ def train_model(
 
             total_loss += loss.item()
 
-        avg_train = total_loss / len(train_loader)
+        avg_train = total_loss / len(train_loader) if len(train_loader) > 0 else 0.0
 
         # ---- Validation ----
         model.eval()
@@ -240,8 +240,8 @@ def train_model(
                 correct += (preds == y).sum().item()
                 total += y.size(0)
 
-        avg_val = val_loss / len(val_loader)
-        accuracy = 100 * correct / total
+        avg_val = val_loss / len(val_loader) if len(val_loader) > 0 else 0.0
+        accuracy = 100 * correct / total if total > 0 else 0.0
 
         print(f"Epoch {epoch}/{epochs} | "
               f"Train Loss: {avg_train:.4f} | "
@@ -268,6 +268,11 @@ if __name__ == "__main__":
     print(f"Loaded {len(logs)} decisions.")
 
     dataset = PokerDataset(args.log_dir)
+
+    if len(dataset) == 0:
+        print(f"Error: No training data found in {args.log_dir}")
+        print("Please run some games first to generate logs.")
+        return
 
     # 90% training / 10% validation
     val_size = max(1, int(0.10 * len(dataset)))
