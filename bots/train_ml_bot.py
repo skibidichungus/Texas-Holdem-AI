@@ -96,110 +96,194 @@ class PokerDataset(Dataset):
         "raise_large": 5
     }
 
-    def __init__(self, log_folder):
+    def __init__(self, log_folder, filter_players=None, filter_winners_only=False):
+        """
+        Args:
+            log_folder: Directory containing log files
+            filter_players: List of player IDs to include (e.g., ["P3"] for MonteCarloBot only)
+            filter_winners_only: If True, only include decisions from hands that were won
+        """
         self.samples = []
-
+        
+        # Load all decisions first to build memory context
+        all_decisions = []  # Will store all decisions in order
         for path in glob.glob(f"{log_folder}/**/*.jsonl", recursive=True):
             with open(path) as f:
-                for line in f:
-                    row = json.loads(line)
-                    if "chosen_action" not in row:
+                for line_num, line in enumerate(f):
+                    line = line.strip()
+                    if not line:
                         continue
-
-                    chosen = row["chosen_action"]
-                    act_type = chosen["type"]
-                    act_amt = chosen["amount"]
-
-                    # --------- LABEL ENCODING ---------
-                    if act_type in ("fold", "check", "call"):
-                        label = self.ACTION_MAP[act_type]
-
-                    elif act_type in ("raise", "bet"):
-                        # We need min/max to bucket
-                        legal = next(
-                            (la for la in row["legal"]
-                             if la["type"] in ("raise", "bet")),
-                            None
-                        )
-                        if legal is None:
-                            # shouldn't happen, fallback to call
-                            label = self.ACTION_MAP["call"]
-                        else:
-                            lo, hi = legal["min"], legal["max"]
-
-                            # bucket the raise amount
-                            if act_amt <= lo + (hi - lo) * 0.33:
-                                label = self.ACTION_MAP["raise_small"]
-                            elif act_amt <= lo + (hi - lo) * 0.66:
-                                label = self.ACTION_MAP["raise_medium"]
-                            else:
-                                label = self.ACTION_MAP["raise_large"]
-                    else:
-                        # Safety fallback
+                    try:
+                        row = json.loads(line)
+                        if "chosen_action" in row:
+                            # Store with file path and line number for ordering
+                            row['_file'] = path
+                            row['_line'] = line_num
+                            all_decisions.append(row)
+                    except:
                         continue
+        
+        # Load hand results to track winners
+        hand_results = {}  # hand_id -> winner player_id
+        if filter_winners_only:
+            for path in glob.glob(f"{log_folder}/**/*.jsonl", recursive=True):
+                with open(path) as f:
+                    for line in f:
+                        try:
+                            row = json.loads(line)
+                            if "result" in row and "hand_id" in row:
+                                result = row["result"]
+                                if result.get("net", 0) > 0:  # Winner (positive net)
+                                    hand_results[row["hand_id"]] = result.get("player")
+                        except:
+                            continue
 
-                    # --------- FEATURE ENCODING ---------
-                    hole = row.get("hole", [])
-                    hole_enc = []
+        # Process each decision with memory context
+        for decision_idx, row in enumerate(all_decisions):
+            if "chosen_action" not in row:
+                continue
+            
+            # Filter by player
+            player_id = row.get("player")
+            if filter_players and player_id not in filter_players:
+                continue
+            
+            # Filter by winner
+            if filter_winners_only:
+                hand_id = row.get("hand_id")
+                if hand_id not in hand_results or hand_results[hand_id] != player_id:
+                    continue
 
-                    for c in hole:
-                        hole_enc += encode_card(c)
+            chosen = row["chosen_action"]
+            act_type = chosen["type"]
+            act_amt = chosen["amount"]
 
-                    # pad missing hole cards
-                    while len(hole_enc) < 4:
-                        hole_enc.append(0)
+            # --------- LABEL ENCODING ---------
+            if act_type in ("fold", "check", "call"):
+                label = self.ACTION_MAP[act_type]
 
-                    board = row["board"]
-                    board_enc = []
-                    for c in board:
-                        board_enc += encode_card(c)
-                    while len(board_enc) < 10:
-                        board_enc.append(0)
-
-                    street = STREET_MAP[row["street"]]
-                    pot = float(row["pot"])
-                    to_call = float(row["to_call"])
-
-                    stacks = row["stacks"]
-                    me = row["player"]
-                    hero_stack = float(stacks[me])
-                    eff_stack = min(float(v) for v in stacks.values())
-                    n_players = len([v for v in stacks.values() if v > 0])
-                    
-                    # NEW FEATURES: Hand strength, pot odds, position
-                    # Hand strength
-                    if hole and len(hole) >= 2:
-                        from core.engine import approx_score
-                        score = approx_score(hole, board)
-                        hand_strength = min(1.0, score / 400.0)
+            elif act_type in ("raise", "bet"):
+                legal = next(
+                    (la for la in row["legal"]
+                     if la["type"] in ("raise", "bet")),
+                    None
+                )
+                if legal is None:
+                    label = self.ACTION_MAP["call"]
+                else:
+                    lo, hi = legal["min"], legal["max"]
+                    if act_amt <= lo + (hi - lo) * 0.33:
+                        label = self.ACTION_MAP["raise_small"]
+                    elif act_amt <= lo + (hi - lo) * 0.66:
+                        label = self.ACTION_MAP["raise_medium"]
                     else:
-                        hand_strength = 0.0
-                    
-                    # Pot odds
-                    if pot + to_call > 0:
-                        pot_odds = to_call / (pot + to_call)
-                    else:
-                        pot_odds = 0.0
-                    
-                    # Position encoding
-                    position_order = {
-                        "UTG": 0.0, "UTG+1": 0.1, "MP": 0.3, "LJ": 0.4,
-                        "HJ": 0.6, "CO": 0.8, "BTN": 1.0, "SB": 0.7, "BB": 0.5
-                    }
-                    position = row.get("position", "MP")  # Default to MP if missing
-                    position_value = position_order.get(position, 0.5)
+                        label = self.ACTION_MAP["raise_large"]
+            else:
+                continue
 
-                    features = [
-                        street, pot, to_call,
-                        hero_stack, eff_stack, n_players
-                    ] + hole_enc + board_enc + [hand_strength, pot_odds, position_value]  # +3 features
+            # --------- FEATURE ENCODING ---------
+            hole = row.get("hole", [])
+            hole_enc = []
 
-                    self.samples.append(
-                        (
-                            torch.tensor(features, dtype=torch.float32),
-                            torch.tensor(label)
-                        )
-                    )
+            for c in hole:
+                hole_enc += encode_card(c)
+
+            while len(hole_enc) < 4:
+                hole_enc.append(0)
+
+            board = row["board"]
+            board_enc = []
+            for c in board:
+                board_enc += encode_card(c)
+            while len(board_enc) < 10:
+                board_enc.append(0)
+
+            street = STREET_MAP[row["street"]]
+            pot = float(row["pot"])
+            to_call = float(row["to_call"])
+
+            stacks = row["stacks"]
+            me = row["player"]
+            hero_stack = float(stacks[me])
+            eff_stack = min(float(v) for v in stacks.values())
+            n_players = len([v for v in stacks.values() if v > 0])
+            
+            # Hand strength
+            if hole and len(hole) >= 2:
+                from core.engine import approx_score
+                score = approx_score(hole, board)
+                hand_strength = min(1.0, score / 400.0)
+            else:
+                hand_strength = 0.0
+            
+            # Pot odds
+            if pot + to_call > 0:
+                pot_odds = to_call / (pot + to_call)
+            else:
+                pot_odds = 0.0
+            
+            # Position encoding
+            position_order = {
+                "UTG": 0.0, "UTG+1": 0.1, "MP": 0.3, "LJ": 0.4,
+                "HJ": 0.6, "CO": 0.8, "BTN": 1.0, "SB": 0.7, "BB": 0.5
+            }
+            position = row.get("position", "MP")
+            position_value = position_order.get(position, 0.5)
+
+            # NEW: Calculate memory features from previous decisions
+            opponents = row.get("opponents", [])
+            memory_features = self._calculate_memory_features(
+                all_decisions, decision_idx, me, opponents, row.get("_file")
+            )
+
+            features = [
+                street, pot, to_call,
+                hero_stack, eff_stack, n_players
+            ] + hole_enc + board_enc + [hand_strength, pot_odds, position_value] + memory_features
+
+            self.samples.append(
+                (
+                    torch.tensor(features, dtype=torch.float32),
+                    torch.tensor(label)
+                )
+            )
+
+    def _calculate_memory_features(self, all_decisions, current_idx, me, opponents, current_file):
+        """
+        Calculate opponent behavior features from previous decisions in the same session.
+        Returns [avg_aggression, avg_tightness, avg_vpip]
+        """
+        if not opponents:
+            return [0.5, 0.5, 0.5]  # Neutral values
+        
+        # Get previous decisions from same file (same tournament session)
+        previous_decisions = [
+            d for d in all_decisions[:current_idx]
+            if d.get("_file") == current_file and d.get("player") in opponents
+        ]
+        
+        if not previous_decisions:
+            return [0.5, 0.5, 0.5]  # No history yet
+        
+        # Calculate stats from last 10 opponent actions
+        recent = previous_decisions[-10:]
+        
+        total_actions = len(recent)
+        if total_actions == 0:
+            return [0.5, 0.5, 0.5]
+        
+        aggressive_count = sum(1 for d in recent 
+                              if d.get("chosen_action", {}).get("type") in ("bet", "raise"))
+        fold_count = sum(1 for d in recent 
+                        if d.get("chosen_action", {}).get("type") == "fold")
+        vpip_count = sum(1 for d in recent 
+                        if d.get("chosen_action", {}).get("type") in ("call", "bet", "raise"))
+        
+        avg_aggression = aggressive_count / total_actions
+        avg_tightness = fold_count / total_actions
+        avg_vpip = vpip_count / total_actions
+        
+        return [avg_aggression, avg_tightness, avg_vpip]
 
     def __len__(self):
         return len(self.samples)
@@ -291,18 +375,26 @@ if __name__ == "__main__":
     parser.add_argument("--batch", type=int, default=64)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--filter_players", type=str, nargs="+", default=None,
+                        help="Only train on decisions from these players (e.g., --filter_players P3)")
+    parser.add_argument("--filter_winners", action="store_true",
+                        help="Only train on decisions from winning hands")
     args = parser.parse_args()
 
     print("Loading logs...")
     logs = load_decision_logs(args.log_dir)
     print(f"Loaded {len(logs)} decisions.")
 
-    dataset = PokerDataset(args.log_dir)
+    dataset = PokerDataset(
+        args.log_dir,
+        filter_players=args.filter_players,
+        filter_winners_only=args.filter_winners
+    )
 
     if len(dataset) == 0:
         print(f"Error: No training data found in {args.log_dir}")
         print("Please run some games first to generate logs.")
-        sys.exit(1)  # Changed from 'return' to 'sys.exit(1)'
+        sys.exit(1)
 
     # 90% training / 10% validation
     val_size = max(1, int(0.10 * len(dataset)))
@@ -313,9 +405,13 @@ if __name__ == "__main__":
     val_loader = DataLoader(val_data, batch_size=args.batch)
 
     print(f"Training samples: {train_size}  |  Validation samples: {val_size}")
+    if args.filter_players:
+        print(f"Filtered to players: {args.filter_players}")
+    if args.filter_winners:
+        print("Filtered to winning hands only")
 
     sample_x, _ = dataset[0]
-    input_size = sample_x.shape[0]  # Will be 23 now
+    input_size = sample_x.shape[0]
 
     model = PokerMLP(input_dim=input_size, hidden=128, num_classes=6)
 

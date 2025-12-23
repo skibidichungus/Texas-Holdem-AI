@@ -1,86 +1,204 @@
 # ♠️ Texas Hold'em AI Bot Engine
 
-A fully functional **Texas Hold’em poker engine** featuring:
+A fully functional **Texas Hold'em poker engine** featuring:
 - **Stable betting logic** (blinds, raises, legal actions)
 - **Plug-in bot architecture**
-- **Three bot types**:
-  | Bot | Strategy |
-  |-----|----------|
-  | `PokerMindBot` | Heuristic + board strength |
-  | `MonteCarloBot` | Simulated rollouts vs random hands |
-  | `MLBot` | PyTorch model (trainable) |
+- **Four bot types**:
+  | Bot | Strategy | Performance |
+  |-----|----------|------------|
+  | `PokerMindBot` | Heuristic + board strength + position awareness | Moderate |
+  | `MonteCarloBot` | Simulated rollouts vs random hands + position awareness | **Strongest** |
+  | `MLBot` | PyTorch supervised learning (trainable) | Learning |
+  | `RLBot` | Reinforcement learning (REINFORCE) | Learning |
 
-All engines support logging, replaying, and future ML training.
+**Note**: MonteCarloBot is currently the strongest bot, consistently winning 40-50% in multi-player tournaments. MLBot and RLBot are trainable but require extensive training to compete.
+
+All engines support logging, replaying, and ML training.
 
 ## Requirements
 - Python 3.7+
-- PyTorch (for MLBot training and inference)
+- PyTorch (for MLBot and RLBot)
+- Matplotlib (for tournament visualization)
 - Standard library only (no other external dependencies)
 
-Install PyTorch:
-pip install torch---
-
----
+Install dependencies:
+```bash
+pip install torch matplotlib
+```
 
 ## Project Structure
 
 ```
 Texas Hold'em Bot/
-├── core/ # Engine + logging + events
-│ ├── engine.py
-│ ├── bot_api.py
-│ ├── logger.py
-│ └── init.py
+├── core/                    # Engine + logging + events
+│   ├── engine.py            # Core game logic
+│   ├── bot_api.py           # Bot interface
+│   ├── logger.py            # Decision logging
+│   └── __init__.py
 │
-├── bots/ # Pluggable bot implementations
-│ ├── poker_mind_bot.py # Smart heuristic bot
-│ ├── monte_carlo_bot.py # Monte Carlo bot
-│ ├── ml_bot.py # Safe ML inference bot
-│ └── models/
-│ ├── ml_model.pt # (optional, ignored if missing)
-│ └── train_ml_bot.py
+├── bots/                    # Pluggable bot implementations
+│   ├── poker_mind_bot.py    # SmartBot (heuristic)
+│   ├── monte_carlo_bot.py   # MonteCarloBot (simulation-based)
+│   ├── ml_bot.py            # MLBot (supervised learning)
+│   ├── rl_bot.py            # RLBot (reinforcement learning)
+│   ├── train_ml_bot.py      # MLBot training script
+│   └── models/
+│       ├── ml_model.pt       # Trained MLBot model (optional)
+│       ├── rl_model.pt       # Trained RLBot model (optional)
+│       └── poker_mlp.py    # Neural network architecture
 │
-├── logs/ # Auto-generated decision logs (ignored by git)
-├── run_local_match.py
+├── logs/                    # Auto-generated decision logs (ignored by git)
+├── run_local_match.py       # Single tournament runner
+├── run_tournament_stats.py  # Batch tournament statistics
+├── train_rl_bot.py          # RLBot training script
 └── README.md
 ```
 
 ## How to Run
 
 ### Tournament Mode (Play Until One Winner)
-The default mode now runs a tournament until only one player remains:
+The default mode runs a tournament until only one player remains:
+```bash
 python3 run_local_match.py
+```
 This will:
 - Play hands until one player has all the chips
 - Display real-time chip stacks after each hand
 - Generate a visualization chart showing tournament progress
 - Save the chart as `tournament_progress.png`
 
-### Fixed Number of Hands (Legacy)
-If you want to play a fixed number of hands, you can modify `run_local_match.py` to use:
-tm.run(seats=seats, bot_for=bots, small_blind=1, big_blind=2, hands=20)---
-
-You can swap which bots are used inside run_local_match.py.
-
+### Running Multiple Tournaments (Win Rate Tracking)
+To evaluate bot performance over many tournaments:
 ```bash
-seats = {
-    "P1": MLBot(),
-    "P2": MonteCarloBot(),
-    "P3": PokerMindBot()
+python3 run_tournament_stats.py --tournaments 100 --chips 500
+```
+This will:
+- Run multiple tournaments silently
+- Track win rates for each bot
+- Report average hands per tournament
+- Useful for comparing bot performance
+
+You can swap which bots are used inside `run_local_match.py` or `run_tournament_stats.py`:
+
+```python
+bots = {
+    "P1": RLBot(training_mode=False),
+    "P2": MLBot(),
+    "P3": SmartBot(),
+    "P4": MonteCarloBot(),
+    "P5": MonteCarloBot(simulations=150),
 }
 ```
 
+## Bot Descriptions
+
+### PokerMindBot (SmartBot)
+**Location**: `bots/poker_mind_bot.py`
+
+A heuristic-based bot with:
+- **Hand Strength Estimation**: Uses `approx_score` to evaluate hand strength
+- **Position Awareness**: Adjusts strategy based on position (early/middle/late)
+- **Pot Odds Calculation**: Considers pot size and bet sizing
+
+**Preflop Strategy**:
+- Premium hands: AA, KK, QQ, JJ, AK, AQ → Raise
+- Good hands: Broadway, suited broadway, medium pairs → Call/Check
+- Trash hands: Fold when facing a bet, otherwise Check
+
+**Postflop Strategy**:
+- Strong hands → bet/raise (~50% pot)
+- Medium hands → call small bets
+- Weak hands → check/fold
+- 10% chance to bluff
+
+### MonteCarloBot ⭐ (Currently Strongest)
+**Location**: `bots/monte_carlo_bot.py`
+
+**Performance**: Consistently wins 40-50% in multi-player tournaments. The strongest bot in the current implementation.
+
+**Features**:
+- **Monte Carlo Simulation**: Simulates thousands of random outcomes (default: 200 simulations)
+- **Equity Estimation**: Calculates win probability against random hands
+- **Pot Odds**: Compares equity to pot odds for decision making
+- **Position Awareness**: Adjusts winrate thresholds based on position
+
+**How it works**:
+1. Simulates random opponent hands and board completions
+2. Calculates win rate from simulations
+3. Compares win rate to pot odds
+4. Makes decisions based on equity vs. pot odds
+
+**Recommended for**: One-and-done tournaments, competitive play
+
+### MLBot (Supervised Learning)
+**Location**: `bots/ml_bot.py`
+
+A PyTorch-based neural network that learns from logged game decisions.
+
+**Features**:
+- **26-Dimensional Feature Vector**: Includes street, pot, stacks, hole cards, board, hand strength, pot odds, position, and opponent memory
+- **Short-Term Memory**: Tracks opponent aggression, tightness, and VPIP during the game
+- **Adaptive Strategy**: Adjusts predictions based on opponent behavior
+- **Fallback Strategy**: Uses heuristic-based play when model confidence is low or model is untrained
+
+**Train the ML Model**:
+```bash
+python3 bots/train_ml_bot.py --log_dir logs --epochs 8
+```
+
+**Advanced Training Options**:
+```bash
+# Train only on specific bot's decisions (e.g., learn from MonteCarloBot)
+python3 bots/train_ml_bot.py --log_dir logs --epochs 8 --filter_players P3
+
+# Train only on winning hands
+python3 bots/train_ml_bot.py --log_dir logs --epochs 8 --filter_winners
+```
+
+**Note**: If the model file is missing or has an incompatible format, the bot will use an untrained model (random weights) and continue running normally.
+
+### RLBot (Reinforcement Learning)
+**Location**: `bots/rl_bot.py`
+
+A reinforcement learning bot using the REINFORCE algorithm. Learns optimal strategies through trial and error.
+
+**Features**:
+- **Policy Gradient Learning**: Uses REINFORCE algorithm
+- **512-Hidden Unit Network**: Deep neural network for complex strategy learning
+- **26-Dimensional Features**: Same feature set as MLBot
+- **Opponent Memory**: Tracks opponent behavior during tournaments
+- **Fallback Strategy**: Uses heuristic play when model is untrained
+
+**Train the RL Bot**:
+```bash
+# Train against MonteCarloBot (recommended)
+python3 train_rl_bot.py --episodes 50000 --opponent montecarlo
+
+# Train through self-play
+python3 train_rl_bot.py --episodes 50000 --opponent self
+
+# Train against SmartBot (easier)
+python3 train_rl_bot.py --episodes 50000 --opponent smart
+```
+
+**Training Notes**:
+- Training takes significant time (50,000+ episodes recommended)
+- Current performance: ~10% win rate in 1v1 against MonteCarloBot
+- Still under development - MonteCarloBot remains stronger
+- Model saved to `bots/models/rl_model.pt`
+
+**Note**: RLBot is experimental. For competitive play, use MonteCarloBot.
+
 ## Decision Logging
-Every hand is now logged automatically to:
+Every hand is automatically logged to:
 ```bash
-logs/YYYY-MM-DD_HHMMSS/
+logs/session_YYYYMMDD_HHMMSS.jsonl
 ```
-Each bot’s decisions are stored as newline-separated JSON objects in:
-```bash
-logs/<timestamp>/hand_<N>.jsonl
-```
+
+Each bot's decisions are stored as newline-separated JSON objects. These logs are used to train MLBot and can be analyzed for strategy insights.
+
 ### Example log entry
-```bash
+```json
 {
   "player": "P2",
   "street": "turn",
@@ -95,123 +213,10 @@ logs/<timestamp>/hand_<N>.jsonl
   "hand_id": 27
 }
 ```
-These data are used to train future models.
-
-### What gets logged
-- Hole cards (P1 never sees opponents’ hole cards)
-- Board cards at time of action
-- Pot size
-- Amount needed to call
-- Legal actions (fold/check/call/raise info)
-- Final chosen action
-- Stack sizes
-- Which opponents are in the hand
-- Whether the bot is folded on this street
-- hand_id (stable across all logs)
-
-### Hand Result Logs
-At the end of each hand:
-```bash
-{"hand_id": 27, "result": {"player": "P1", "net": +12.0}}
-```
-
-## Finding the Most Recent Log
-Logs are stored in timestamped folders:
-```bash
-logs/2025-11-19_1458/
-logs/2025-11-19_1523/
-logs/2025-11-19_1650/
-```
-The most recent folder is the one with the latest timestamp.
-Use macOS Terminal:
-```bash
-ls -1 logs | sort
-```
-Or newest first:
-```bash
-ls -1t logs
-```
-
-## Log format for ML Training
-ML bot will train on .jsonl files where each line is one decision.
-The recommended ML dataset fields:
-| field           | meaning                               |
-| --------------- | ------------------------------------- |
-| `hole`          | 2-card private hand                   |
-| `board`         | visible board cards                   |
-| `pot`           | pot size before action                |
-| `to_call`       | how much needed to call               |
-| `legal`         | formatted bet/call/fold/check options |
-| `stacks`        | chip counts of all players            |
-| `chosen_action` | the target label                      |
-| `folded`        | if player is already folded           |
-| `street`        | preflop / flop / turn / river         |
-| `hand_id`       | join results + decisions              |
-You can load it with Python:
-```bash
-import json
-
-with open("logs/.../hand_12.jsonl") as f:
-    data = [json.loads(line) for line in f]
-```
-
-## PokerMindBot (SmartBot)
-Located at:
-```bash
-bots/poker_mind_bot.py
-```
-### Preflop Strategy
-- Premium hands: AA, KK, QQ, JJ, AK, AQ → Raise
-- Good hands: Broadway, suited broadway, medium pairs → Call/Check
-- Trash hands: Fold when facing a bet, otherwise Check
-
-### Postflop Strategy
-Uses:
-```bash
-approx_score(hole + board)
-```
-- Strong hands → bet/raise (~50% pot)
-- Medium hands → call small bets
-- Weak hands → check/fold
-- 10% chance to bluff
-
-### Safety Guarantees
-SmartBot ALWAYS:
-- Never makes illegal actions
-- Respects to_call
-- Never checks when facing a bet
-- Never raises below min or above stack
-
-## MonteCarloBot (Rollout Bot)
-Located in:
-```bash
-bots/monte_carlo_bot.py
-```
-
-## MLBot (Neural Bot)
-- Uses a PyTorch MLP classifier
-- Loads model weights from:
-```bash
-bots/models/ml_model.pt
-```
-**Note**: If the model file is missing, the bot will use an untrained model (random weights) and continue running normally. This allows you to test the bot before training.
-
-### Train the ML Model
-```bash
-python3 bots/train_ml_bot.py --log_dir logs --epochs 8
-```
-A new model will be saved automatically. Make sure you have some game logs in the `logs/` directory first.
-
-### How it works:
-- Uses a 20-dimensional feature vector (street, pot, stacks, hole cards, board)
-- Predicts one of 6 action classes: fold, check, call, raise_small, raise_medium, raise_large
-- Trained on logged game decisions from previous matches
 
 ## About the Engine
-Located in:
-```bash
-core/engine.py
-```
+**Location**: `core/engine.py`
+
 ### Engine Features:
 - Correct blinds posting
 - Correct betting cycle with safety-breaks
@@ -220,47 +225,51 @@ core/engine.py
 - Showdown using approximate scoring
 - Fold-wins return immediately
 - Tournament support via TournamentManager
-The engine is now stable across 3–6 players for long simulations.
+- Supports 2-10 players
+- Safety limit: 10,000 hands per tournament
 
-## Example output
-```bash
-Final stacks:
-  P1: 327.25
-  P2: 0.00
-  P3: 72.75
+The engine is stable and deterministic across 3–6 players for long simulations.
 
-Net chips:
-  P1: +127.25
-  P2: -200.00
-  P3: +72.75
-```
+## Performance Comparison
+
+Based on 5-player tournament statistics (100 tournaments, 500 chips each):
+
+| Bot | Win Rate | Notes |
+|-----|----------|-------|
+| MonteCarloBot (200 sims) | ~40% | **Strongest** - simulation-based |
+| MonteCarloBot (150 sims) | ~40% | Slightly weaker but still strong |
+| SmartBot | ~20% | Solid heuristic-based play |
+| MLBot | ~3% | Requires extensive training |
+| RLBot | ~1% | Still learning, experimental |
+
+**Recommendation**: For competitive play, use **MonteCarloBot**.
 
 ## Adding Your Own Bot
-Create a new file under:
-```bash
-bots/
-```
-Example:
-```bash
+Create a new file under `bots/` and implement the `act()` method:
+
+```python
+from core.bot_api import Action, PlayerView
+
 class MyBot:
-    def act(self, state):
-        return {"type": "fold"}
+    def act(self, state: PlayerView) -> Action:
+        # Your strategy here
+        legal = state.legal_actions
+        # ... make decision ...
+        return Action("fold")  # or "call", "raise", etc.
 ```
-Bots interact with the engine via:
-```bash
-core/bot_api.py
-```
+
+Bots interact with the engine via `core/bot_api.py`.
 
 ## Future Work
 - Full 7-card evaluator (replace approx_score)
 - Side pot support for multi-all-in
-- Real opponent modeling + bluff balancing
-- Reinforcement learning pipeline
+- Advanced opponent modeling + bluff balancing
+- Improved RL algorithms (PPO, A3C)
 - Tournament ranking with ELO
+- Multi-table tournament support
 
 ## License
-MIT License.
-Use, modify, and extend freely. Attribution appreciated.
+MIT License. Use, modify, and extend freely. Attribution appreciated.
 
 ## Special Notes
 This engine is fully deterministic and safe:
@@ -268,4 +277,5 @@ This engine is fully deterministic and safe:
 - No infinite betting loops
 - Always respects to_call, raise min/max, and blinds
 - Logs 100% of bot decisions
+
 Perfect foundation for research, ML training, or poker AI competitions.

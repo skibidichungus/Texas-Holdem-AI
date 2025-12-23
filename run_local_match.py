@@ -1,10 +1,11 @@
 # run_local_match.py
 
 from core.engine import Table, TournamentManager, Seat, InProcessBot
-from core.bot_api import BotAdapter, PlayerView, Action  # Add Action import
+from core.bot_api import BotAdapter, PlayerView, Action
 from bots.poker_mind_bot import SmartBot
 from bots.monte_carlo_bot import MonteCarloBot
 from bots.ml_bot import MLBot
+from bots.rl_bot import RLBot  # Add RLBot import
 import matplotlib.pyplot as plt
 from collections import defaultdict
 
@@ -59,7 +60,7 @@ def run_tournament_until_winner(seats, bots, small_blind, big_blind):
         active_bots = {}
         for s in active_seats:
             bot = bots[s.player_id]
-            if isinstance(bot, MLBot):
+            if isinstance(bot, (MLBot, RLBot)):  # Both need InProcessBot
                 active_bots[s.player_id] = InProcessBot(bot)
             else:
                 # SmartBot and MonteCarloBot already accept PlayerView
@@ -130,13 +131,13 @@ def plot_tournament_progress(chip_history, player_ids):
 
 
 def main():
-    # 3-player demo table with 200 chips each
+    # 3-player demo table with 500 chips each
     seats = [Seat(player_id=f"P{i+1}", chips=500) for i in range(3)]
     player_ids = [s.player_id for s in seats]
     
-    # Set up bots
+    # Set up bots - you can now use RLBot!
     bots = {
-        "P1": MLBot(),
+        "P1": RLBot(training_mode=False),  # Use trained RL bot
         "P2": SmartBot(),
         "P3": MonteCarloBot(),
     }

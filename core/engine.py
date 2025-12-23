@@ -30,7 +30,8 @@ def approx_score(hole: List[Card], board: List[Card]) -> int:
     for r in ranks:
         counts[r] += 1
     freq = sorted(counts.values(), reverse=True)
-    base = sum(RANK_TO_INT[r] for r in ranks)
+    # Safety check: only sum valid ranks
+    base = sum(RANK_TO_INT.get(r, 0) for r in ranks)
     if freq[0] == 4:
         base += 200
     elif freq[0] == 3 and 2 in freq:
@@ -41,7 +42,8 @@ def approx_score(hole: List[Card], board: List[Card]) -> int:
         base += 80
     elif freq[0] == 2:
         base += 40
-    branks = sorted(RANK_TO_INT[r] for r, _ in board)
+    # Safety check for board ranks
+    branks = sorted(RANK_TO_INT.get(r, 0) for r, _ in board)
     gaps = [branks[i + 1] - branks[i] for i in range(len(branks) - 1)] if len(branks) >= 2 else []
     base += 5 * sum(1 for g in gaps if g <= 2)
     return base
