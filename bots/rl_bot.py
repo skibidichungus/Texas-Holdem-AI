@@ -9,7 +9,7 @@ import random
 import numpy as np
 from collections import deque
 from core.bot_api import Action, PlayerView
-from core.engine import approx_score
+from core.engine import eval_hand
 
 # Card encoding (same as MLBot)
 RANKS = {"2":2, "3":3, "4":4, "5":5, "6":6, "7":7, "8":8,
@@ -149,11 +149,11 @@ class RLBot:
         return torch.tensor(features, dtype=torch.float32).unsqueeze(0).to(self.device)
     
     def _estimate_hand_strength(self, hole, board):
-        """Estimate hand strength."""
+        """Hand strength estimate using the treys evaluator (0.0–1.0)."""
         if not hole or len(hole) < 2:
             return 0.0
-        score = approx_score(hole, board)
-        return min(1.0, score / 500.0)
+        score = eval_hand(hole, board)
+        return min(1.0, score / 7462.0)
     
     def _calculate_memory_features(self, history, me, opponents):
         """Calculate opponent behavior features."""
@@ -163,7 +163,7 @@ class RLBot:
         opponent_actions = []
         for entry in history:
             if isinstance(entry, dict):
-                player = entry.get("player")
+                player = entry.get("pid")
                 action = entry.get("action", {})
                 if player in opponents and isinstance(action, dict):
                     opponent_actions.append({
@@ -202,7 +202,7 @@ class RLBot:
             return
         for entry in history:
             if isinstance(entry, dict):
-                player = entry.get("player")
+                player = entry.get("pid")
                 action = entry.get("action", {})
                 if player in opponents and isinstance(action, dict):
                     action_type = action.get("type", "fold")

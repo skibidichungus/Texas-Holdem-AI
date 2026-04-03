@@ -23,30 +23,34 @@ Card = Tuple[str, str]
 def full_deck() -> List[Card]:
     return [(r, s) for r in RANKS for s in SUITS]
 
-def approx_score(hole: List[Card], board: List[Card]) -> int:
-    cards = hole + board
-    ranks = [c[0] for c in cards]
-    counts = defaultdict(int)
-    for r in ranks:
-        counts[r] += 1
-    freq = sorted(counts.values(), reverse=True)
-    # Safety check: only sum valid ranks
-    base = sum(RANK_TO_INT.get(r, 0) for r in ranks)
-    if freq[0] == 4:
-        base += 200
-    elif freq[0] == 3 and 2 in freq:
-        base += 180
-    elif freq[0] == 3:
-        base += 120
-    elif freq[0] == 2 and freq.count(2) >= 2:
-        base += 80
-    elif freq[0] == 2:
-        base += 40
-    # Safety check for board ranks
-    branks = sorted(RANK_TO_INT.get(r, 0) for r, _ in board)
-    gaps = [branks[i + 1] - branks[i] for i in range(len(branks) - 1)] if len(branks) >= 2 else []
-    base += 5 * sum(1 for g in gaps if g <= 2)
-    return base
+def eval_hand(hole: List[Card], board: List[Card]) -> int:
+    """
+    Evaluate a poker hand using the treys library.
+    Returns an integer where higher is better (range 1–7462).
+    Correctly ranks all standard hands: high card < pair < two pair < trips
+    < straight < flush < full house < quads < straight flush.
+
+    hole:  exactly 2 hole cards as (rank, suit) tuples, e.g. [('A','h'), ('K','s')]
+    board: 0–5 community cards in the same format.
+
+    When fewer than 3 board cards are available (preflop / early street in
+    feature estimation) a simple rank-based heuristic is returned instead,
+    because the treys evaluator requires at least 3 board cards.
+    """
+    if len(board) >= 3:
+        from treys import Card as TreysCard, Evaluator
+        evaluator = Evaluator()
+        treys_hole  = [TreysCard.new(r + s) for r, s in hole]
+        treys_board = [TreysCard.new(r + s) for r, s in board]
+        # treys: 1 = best (royal flush), 7462 = worst → invert so higher = better
+        return 7463 - evaluator.evaluate(treys_board, treys_hole)
+    else:
+        # Preflop heuristic (no board yet): rank sum + pocket-pair bonus
+        ranks = [c[0] for c in hole]
+        base = sum(RANK_TO_INT.get(r, 0) for r in ranks)
+        if ranks[0] == ranks[1]:
+            base += 40          # pocket pair bonus
+        return base
 
 def _compute_to_call(contrib, alive_pids, pid):
     """
@@ -56,16 +60,16 @@ def _compute_to_call(contrib, alive_pids, pid):
 
     Returns (to_call, highest_contrib).
     """
-    highest = 0.0
+    highest = 0
     for p in alive_pids:
-        c = contrib.get(p, 0.0)
+        c = contrib.get(p, 0)
         if c > highest:
             highest = c
 
-    player_c = contrib.get(pid, 0.0)
+    player_c = contrib.get(pid, 0)
     to_call = highest - player_c
     if to_call < 0:
-        to_call = 0.0
+        to_call = 0
     return to_call, highest
 
 def _legal_actions_for(
@@ -88,9 +92,9 @@ def _legal_actions_for(
     chips = seat.chips
 
     # === CASE: player is NOT facing a bet (to_call == 0) ===
-    if abs(to_call) <= 1e-9:
+    if to_call == 0:
         # CASE A: no bet at all on this street yet (everyone at 0)
-        everyone_zero = all(contrib.get(p, 0.0) == 0.0 for p in alive_pids)
+        everyone_zero = all(contrib.get(p, 0) == 0 for p in alive_pids)
         if everyone_zero:
             # Check or new bet
             legal.append({"type": "check"})
@@ -116,17 +120,46 @@ def _legal_actions_for(
             # raise only if they have more than to_call
             # New *total* contribution must be at least (highest + big_blind)
             min_total = highest + big_blind
-            max_total = contrib.get(pid, 0.0) + chips  # everything they have
+            max_total = contrib.get(pid, 0) + chips  # everything they have
 
-            if min_total > contrib.get(pid, 0.0) and max_total > min_total:
+            if min_total > contrib.get(pid, 0) and max_total > min_total:
                 legal.append({"type": "raise", "min": min_total, "max": max_total})
 
     return legal
 
+def calculate_side_pots(contributions: Dict[str, int]) -> List[Dict]:
+    """
+    Split total per-player contributions into main pot + side pots.
+
+    Args:
+        contributions: {player_id: total_chips_put_in} across all streets.
+
+    Returns:
+        List of pots ordered from main to highest side pot.
+        Each pot is {"amount": int, "eligible": list[str]}.
+        A player is eligible for a pot only if they contributed at least
+        up to that pot's threshold level.
+    """
+    contribs = {pid: amt for pid, amt in contributions.items() if amt > 0}
+    if not contribs:
+        return []
+
+    levels = sorted(set(contribs.values()))
+    pots = []
+    prev_level = 0
+    for level in levels:
+        eligible = [pid for pid, amt in contribs.items() if amt >= level]
+        pot_amount = (level - prev_level) * len(eligible)
+        if pot_amount > 0:
+            pots.append({"amount": pot_amount, "eligible": eligible})
+        prev_level = level
+
+    return pots
+
 @dataclass
 class Seat:
     player_id: str
-    chips: float
+    chips: int
     is_sitting_out: bool = False
 
 class InProcessBot(BotAdapter):
@@ -161,8 +194,8 @@ class RandomBot:
         choice = random.choice(legal)
         if choice["type"] in ("bet", "raise"):
             lo, hi = choice["min"], choice["max"]
-            amt = lo + random.random() * max(0.0, hi - lo)
-            return {"type": choice["type"], "amount": round(amt, 2)}
+            amt = random.randint(lo, hi)
+            return {"type": choice["type"], "amount": amt}
         return {"type": choice["type"]}
 
 class Table:
@@ -170,8 +203,8 @@ class Table:
         self.rng = rng or random.Random(7331)
         self.hand_counter = 0
 
-    def play_hand(self, seats: List[Seat | Dict[str, Any]], small_blind: float, big_blind: float,
-                  dealer_index: int, bot_for: Dict[str, BotAdapter], on_event=None) -> Dict[str, float]:
+    def play_hand(self, seats: List[Seat | Dict[str, Any]], small_blind: int, big_blind: int,
+                  dealer_index: int, bot_for: Dict[str, BotAdapter], on_event=None) -> Dict[str, int]:
         
         logger = DecisionLogger(enabled=True)
 
@@ -203,9 +236,9 @@ class Table:
         pos_by_pid = {seats[idx].player_id: pos for pos, idx in zip(positions, ring)}
 
         # Initialize per-player contributions (for current street)
-        contrib = defaultdict(float, {s.player_id: 0.0 for s in seats if not s.is_sitting_out})
+        contrib = defaultdict(int, {s.player_id: 0 for s in seats if not s.is_sitting_out})
 
-        def post_blind(kind: str, seat_index: int, amount: float):
+        def post_blind(kind: str, seat_index: int, amount: int):
             seat = seats[seat_index]
             amt = min(seat.chips, amount)
             seat.chips -= amt
@@ -234,8 +267,10 @@ class Table:
         ]
 
         # Total pot accumulated from completed streets
-        pot_total = 0.0  # IMPORTANT: start at 0, not blinds
-        running_pot = 0.0
+        pot_total = 0
+
+        # Track each player's total contribution across all streets (for side pots)
+        total_contrib = defaultdict(int)
 
         # --- main street loop ---
         for street_name, fn in streets:
@@ -266,17 +301,21 @@ class Table:
                     for pid in start_chips
                 }
 
-            # No winner yet — move this street's contribs into pot_total
+            # No winner yet — accumulate this street's contribs
+            for pid, c in contrib.items():
+                total_contrib[pid] += c
             pot_total += sum(contrib.values())
 
             # Reset contrib for next street
-            contrib = defaultdict(float, {seats[i].player_id: 0.0 for i in ring})
+            contrib = defaultdict(int, {seats[i].player_id: 0 for i in ring})
 
         # --- showdown ---
-        total_pot = pot_total + sum(contrib.values())
+        # Accumulate final street's contributions
+        for pid, c in contrib.items():
+            total_contrib[pid] += c
 
-        # Distribute pot among remaining players
-        share_net = self._showdown_and_settle(hole, board, total_pot)
+        # Distribute pot using side pots
+        share_net = self._showdown_and_settle(hole, board, total_contrib)
 
         # Apply showdown results
         for pid, delta in share_net.items():
@@ -324,21 +363,21 @@ class Table:
         bot_for, history, on_event, logger
     ):
         print(f"\n=== BETTING ROUND START: {street} ===")
-        print(f"Pot before street: {pot:.2f}")
+        print(f"Pot before street: {pot}")
         print("Ring order:", [seats[i].player_id for i in ring])
-        print("Initial contrib:", {s.player_id: float(contrib.get(s.player_id, 0.0)) for s in seats})
+        print("Initial contrib:", {s.player_id: contrib.get(s.player_id, 0) for s in seats})
 
         # Ensure contrib entries
         if not contrib:
-            contrib = defaultdict(float, {s.player_id: 0.0 for s in seats if not s.is_sitting_out})
+            contrib = defaultdict(int, {s.player_id: 0 for s in seats if not s.is_sitting_out})
         else:
             for s in seats:
-                contrib.setdefault(s.player_id, 0.0)
+                contrib.setdefault(s.player_id, 0)
 
         folded = defaultdict(bool)
         allin = defaultdict(bool)
 
-        current_bet = max(contrib.values()) if contrib else 0.0
+        current_bet = max(contrib.values()) if contrib else 0
         last_raise_size = bb if current_bet > 0 else bb
 
         # ---- helpers ----
@@ -366,7 +405,7 @@ class Table:
                     allin[pid] = True
                     continue
                 live.append(pid)
-                contribs.add(float(contrib[pid]))
+                contribs.add(contrib[pid])
             if len(live) <= 1:
                 return True
             return len(contribs) == 1
@@ -398,18 +437,18 @@ class Table:
                 continue
 
             # Recompute current bet / call amount
-            current_bet = max(contrib.values()) if contrib else 0.0
-            to_call = max(0.0, current_bet - contrib[pid])
+            current_bet = max(contrib.values()) if contrib else 0
+            to_call = max(0, current_bet - contrib[pid])
 
             # LEGAL ACTIONS
             legal = []
-            if to_call <= 1e-9:
+            if to_call == 0:
                 legal.append({"type": "check"})
                 if seat.chips > 0:
                     min_bet = min(bb, seat.chips)
                     max_bet = seat.chips
                     if max_bet >= min_bet:
-                        legal.append({"type": "bet", "min": float(min_bet), "max": float(max_bet)})
+                        legal.append({"type": "bet", "min": min_bet, "max": max_bet})
             else:
                 legal.append({"type": "fold"})
                 call_amt = min(seat.chips, to_call)
@@ -419,22 +458,22 @@ class Table:
                     max_total = seat.chips + contrib[pid]
                     min_total = current_bet + last_raise_size
                     min_total = max(min_total, current_bet + bb)
-                    if max_total + 1e-9 >= min_total:
+                    if max_total >= min_total:
                         legal.append({
                             "type": "raise",
-                            "min": float(min_total),
-                            "max": float(max_total),
+                            "min": min_total,
+                            "max": max_total,
                         })
 
             print(f"[{street}] Acting: {pid} | chips={seat.chips} contrib={contrib[pid]} to_call={to_call}")
             print("    Legal:", legal)
 
             # PlayerView
-            if to_call <= 1e-9:
+            if to_call == 0:
                 pv_min_raise = bb
                 pv_max_raise = seat.chips
             else:
-                pv_min_raise = max(0.0, (current_bet + last_raise_size) - contrib[pid])
+                pv_min_raise = max(0, (current_bet + last_raise_size) - contrib[pid])
                 pv_max_raise = seat.chips
 
             view = PlayerView(
@@ -493,7 +532,7 @@ class Table:
                 lo, hi = spec["min"], spec["max"]
                 if action_amt is None:
                     action_amt = lo
-                amt = float(action_amt)
+                amt = int(action_amt)
                 if amt < lo: amt = lo
                 if amt > hi: amt = hi
                 action_amt = amt
@@ -531,8 +570,8 @@ class Table:
 
             elif action.type in ("bet", "raise"):
                 prev_bet = max(contrib.values())
-                target_total = float(action.amount or 0.0)
-                need = max(0.0, target_total - contrib[pid])
+                target_total = int(action.amount or 0)
+                need = max(0, target_total - contrib[pid])
                 if need > seat.chips:
                     need = seat.chips
                     target_total = contrib[pid] + need
@@ -543,11 +582,11 @@ class Table:
                     allin[pid] = True
 
                 new_bet = max(contrib.values())
-                if street == "preflop" and prev_bet == 0.0:
+                if street == "preflop" and prev_bet == 0:
                     last_raise_size = new_bet
                 else:
                     raise_sz = new_bet - prev_bet
-                    if raise_sz > 1e-9:
+                    if raise_sz > 0:
                         last_raise_size = raise_sz
 
                 print(f"    {pid} {action.type.upper()} to {target_total} (paid {need})")
@@ -570,26 +609,39 @@ class Table:
         return None
 
 
-    def _showdown_and_settle(self, hole, board, total_pot):
-        # If no money in pot, nothing to pay
-        if total_pot <= 0:
-            return {pid: 0.0 for pid in hole}
+    def _showdown_and_settle(self, hole, board, total_contrib):
+        """Distribute winnings using side pots so all-in players only
+        compete for the portion of the pot they contributed to."""
+        net = {pid: 0 for pid in hole}
 
-        # Filter out players who folded or never acted
+        if not total_contrib or sum(total_contrib.values()) <= 0:
+            return net
+
+        # Players still in the hand (not folded)
         eligible = {pid: cards for pid, cards in hole.items() if cards and len(cards) == 2}
         if not eligible:
-            return {pid: 0.0 for pid in hole}
+            return net
 
-        # Compute rough hand strength
-        ranks = {pid: approx_score(cards, board) for pid, cards in eligible.items()}
-        best = max(ranks.values())
-        winners = [pid for pid, r in ranks.items() if r == best]
+        ranks = {pid: eval_hand(cards, board) for pid, cards in eligible.items()}
+        pots = calculate_side_pots(total_contrib)
 
-        # Split pot among winners
-        share = total_pot / len(winners)
-        net = {pid: 0.0 for pid in hole}
-        for w in winners:
-            net[w] += share
+        for pot in pots:
+            # Intersect pot-eligible (contributed enough) with showdown-eligible (didn't fold)
+            contenders = [pid for pid in pot["eligible"] if pid in ranks]
+            if not contenders:
+                # Everyone who contributed to this pot folded — give to any remaining player
+                contenders = [pid for pid in eligible]
+            if not contenders:
+                continue
+
+            best = max(ranks[pid] for pid in contenders)
+            winners = [pid for pid in contenders if ranks[pid] == best]
+            n_winners = len(winners)
+            base_share = pot["amount"] // n_winners
+            remainder = pot["amount"] % n_winners
+            for i, w in enumerate(winners):
+                net[w] += base_share + (1 if i < remainder else 0)
+
         return net
 
 
@@ -608,7 +660,7 @@ class TournamentManager:
         seats = [s if isinstance(s, Seat) else Seat(**s) for s in seats]
         n = len(seats)
         dealer = dealer_index
-        nets = defaultdict(float)
+        nets = defaultdict(int)
         for _ in range(hands):
             res = self.table.play_hand(seats, small_blind, big_blind, dealer, bot_for, on_event=on_event)
             for pid, v in res.items():
@@ -625,7 +677,7 @@ if __name__ == "__main__":
     nets = tm.run(seats, bots, 1, 2, 5)
     print("Final stacks:")
     for s in seats:
-        print(f"  {s.player_id}: {s.chips:.2f}")
+        print(f"  {s.player_id}: {s.chips}")
     print("Net chips:")
     for pid, v in nets.items():
-        print(f"  {pid}: {v:+.2f}")
+        print(f"  {pid}: {v:+}")

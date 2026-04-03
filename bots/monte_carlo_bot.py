@@ -1,6 +1,6 @@
 import random
 from core.bot_api import Action, PlayerView
-from core.engine import approx_score
+from core.engine import eval_hand
 
 
 class MonteCarloBot:
@@ -89,8 +89,8 @@ class MonteCarloBot:
             opp = self._random_opponent_hand(hole, board)
             full_board = self._random_board(board, hole, opp)
 
-            my_score = approx_score(hole, full_board)
-            opp_score = approx_score(opp, full_board)
+            my_score = eval_hand(hole, full_board)
+            opp_score = eval_hand(opp, full_board)
 
             if my_score > opp_score:
                 wins += 1

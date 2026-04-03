@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 @dataclass
 class Action:
     type: str                # "fold" | "check" | "call" | "bet" | "raise"
-    amount: Optional[float] = None
+    amount: Optional[int] = None
 
 @dataclass
 class PlayerView:
@@ -14,12 +14,12 @@ class PlayerView:
     position: str
     hole_cards: list
     board: list
-    pot: float
-    to_call: float
-    min_raise: float
-    max_raise: float
+    pot: int
+    to_call: int
+    min_raise: int
+    max_raise: int
     legal_actions: List[Dict[str, Any]]
-    stacks: Dict[str, float]
+    stacks: Dict[str, int]
     opponents: List[str]
     history: List[Dict[str, Any]]
 

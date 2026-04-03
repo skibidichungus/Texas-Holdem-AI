@@ -210,9 +210,9 @@ class PokerDataset(Dataset):
             
             # Hand strength
             if hole and len(hole) >= 2:
-                from core.engine import approx_score
-                score = approx_score(hole, board)
-                hand_strength = min(1.0, score / 400.0)
+                from core.engine import eval_hand
+                score = eval_hand(hole, board)
+                hand_strength = min(1.0, score / 7462.0)
             else:
                 hand_strength = 0.0
             

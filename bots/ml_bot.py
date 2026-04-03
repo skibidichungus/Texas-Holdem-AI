@@ -1,7 +1,7 @@
 import torch
 import random
 from core.bot_api import Action
-from core.engine import approx_score
+from core.engine import eval_hand
 from bots.models.poker_mlp import PokerMLP
 
 
@@ -18,6 +18,16 @@ def encode_card(card):
 
 
 STREET_MAP = {"preflop":0, "flop":1, "turn":2, "river":3}
+
+def _as_view(state):
+    """Convert a dict state to an attribute-accessible object if needed."""
+    if isinstance(state, dict):
+        class _DictView:
+            def __init__(self, d):
+                for k, v in d.items():
+                    setattr(self, k, v)
+        return _DictView(state)
+    return state
 
 
 # ML BOT -------------------------------------------------------------
@@ -70,13 +80,7 @@ class MLBot:
         Produce feature vector with hand strength, pot odds, and position.
         Now 26 dimensions: 20 original + 3 new features + 3 memory features
         """
-        # Handle both PlayerView and dict
-        if isinstance(state, dict):
-            class DictView:
-                def __init__(self, d):
-                    for k, v in d.items():
-                        setattr(self, k, v)
-            state = DictView(state)
+        state = _as_view(state)
 
         street = STREET_MAP.get(state.street, 0)
         pot = float(state.pot)
@@ -138,27 +142,17 @@ class MLBot:
         return x.to(self.device)
 
     def _estimate_hand_strength(self, hole, board):
-        """Quick hand strength estimate for fallback."""
+        """Hand strength estimate using the treys evaluator (0.0–1.0)."""
         if not hole or len(hole) < 2:
             return 0.0
-        # Simple approximation using approx_score
-        score = approx_score(hole, board)
-        # Normalize roughly (this is approximate)
-        return min(1.0, score / 500.0)
+        score = eval_hand(hole, board)
+        return min(1.0, score / 7462.0)
 
     # ----------------------------------------------------------
     # ACT ------------------------------------------------------
     # ----------------------------------------------------------
     def act(self, state):
-        # Handle both PlayerView objects and dicts (from InProcessBot adapter)
-        if isinstance(state, dict):
-            # Convert dict to PlayerView-like access
-            class DictView:
-                def __init__(self, d):
-                    for k, v in d.items():
-                        setattr(self, k, v)
-            state = DictView(state)
-        
+        state = _as_view(state)
         legal = state.legal_actions
 
         # Update memory from history
@@ -226,14 +220,7 @@ class MLBot:
 
     def _fallback_strategy(self, state):
         """Fallback to simple hand strength logic when model is untrained."""
-        # Handle both PlayerView and dict
-        if isinstance(state, dict):
-            class DictView:
-                def __init__(self, d):
-                    for k, v in d.items():
-                        setattr(self, k, v)
-            state = DictView(state)
-            
+        state = _as_view(state)
         hole = state.hole_cards
         board = state.board
         pot = state.pot
@@ -272,7 +259,7 @@ class MLBot:
         opponent_actions = []
         for entry in history:
             if isinstance(entry, dict):
-                player = entry.get("player")
+                player = entry.get("pid")
                 action = entry.get("action", {})
                 if player in opponents and isinstance(action, dict):
                     opponent_actions.append({
@@ -333,7 +320,7 @@ class MLBot:
         
         for entry in history:
             if isinstance(entry, dict):
-                player = entry.get("player")
+                player = entry.get("pid")
                 action = entry.get("action", {})
                 if player in opponents and isinstance(action, dict):
                     action_type = action.get("type", "fold")

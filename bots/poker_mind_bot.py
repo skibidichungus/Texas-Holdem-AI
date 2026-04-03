@@ -1,7 +1,7 @@
 # bots/poker_mind_bot.py
 
 from core.bot_api import Action, PlayerView
-from core.engine import approx_score
+from core.engine import eval_hand
 
 
 class SmartBot:
@@ -129,22 +129,11 @@ class SmartBot:
     # Hand strength estimator (FIXED)
     # -----------------------------------------------------
     def _approx_strength(self, hole, board):
-        """Calculate hand strength using approx_score."""
+        """Calculate hand strength using the treys evaluator (0.0–1.0)."""
         if not hole or len(hole) < 2:
             return 0.0
-        
-        # Use approx_score to get hand strength
-        score = approx_score(hole, board)
-        
-        # Normalize to 0-1 range (approximate)
-        # Typical scores: weak hands ~50-100, strong hands ~200-400
-        normalized = min(1.0, score / 400.0)
-        
-        # Boost for very strong hands
-        if score > 300:
-            normalized = 0.85 + (score - 300) / 400.0 * 0.15
-        
-        return normalized
+        score = eval_hand(hole, board)
+        return min(1.0, score / 7462.0)
 
 
 # backward compatibility
