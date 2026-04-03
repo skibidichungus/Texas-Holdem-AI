@@ -653,7 +653,8 @@ class TournamentManager:
     def __init__(self, table: Table):
         self.table = table
 
-    def run(self, seats, bot_for, small_blind, big_blind, dealer_index=0, on_event=None):
+    def run(self, seats, bot_for, small_blind, big_blind, dealer_index=0,
+            on_event=None, live_graph=True):
         seats = [s if isinstance(s, Seat) else Seat(**s) for s in seats]
         active_seats = list(seats)
         dealer = dealer_index
@@ -663,11 +664,18 @@ class TournamentManager:
         finishing_order: List[Tuple[str, int]] = []
         total_players = len(seats)
 
+        # Set up live graph
+        player_ids = [s.player_id for s in seats]
+        graph = LiveTournamentGraph(player_ids) if live_graph else None
+
         # Record initial chip snapshot
         snapshot = {"hand": 0}
         for s in seats:
             snapshot[s.player_id] = s.chips
         chip_history.append(snapshot)
+
+        if graph:
+            graph.update(chip_history)
 
         while len(active_seats) > 1:
             hand_number += 1
@@ -683,6 +691,10 @@ class TournamentManager:
             for s in seats:
                 snapshot[s.player_id] = s.chips
             chip_history.append(snapshot)
+
+            # Update live graph
+            if graph:
+                graph.update(chip_history)
 
             # Eliminate busted players (chips <= 0)
             eliminated = [s for s in active_seats if s.chips <= 0]
@@ -702,6 +714,10 @@ class TournamentManager:
             finishing_order.append((active_seats[0].player_id, 1))
             print(f"  [WINNER] {active_seats[0].player_id} wins the tournament!")
 
+        # Finalize graph — save and keep window open
+        if graph:
+            graph.finish()
+
         # Build results dict: player_id -> finishing position
         results = {pid: pos for pid, pos in finishing_order}
 
@@ -713,31 +729,55 @@ class TournamentManager:
         }
 
 
-def plot_tournament(chip_history: List[Dict], filename: str = "tournament_results.png"):
-    """Plot chip stacks over time for each player in the tournament."""
-    import matplotlib.pyplot as plt
+class LiveTournamentGraph:
+    """Real-time matplotlib graph that updates after every hand."""
 
-    if not chip_history:
-        return
+    def __init__(self, player_ids: List[str]):
+        import matplotlib.pyplot as plt
+        self._plt = plt
 
-    # Extract player IDs (all keys except "hand")
-    player_ids = [k for k in chip_history[0] if k != "hand"]
-    hands = [entry["hand"] for entry in chip_history]
+        plt.ion()
+        self._fig, self._ax = plt.subplots(figsize=(12, 6))
+        self._lines = {}
+        for pid in player_ids:
+            line, = self._ax.plot([], [], label=pid, linewidth=2)
+            self._lines[pid] = line
 
-    plt.figure(figsize=(12, 6))
-    for pid in player_ids:
-        stacks = [entry.get(pid, 0) for entry in chip_history]
-        plt.plot(hands, stacks, label=pid, linewidth=2)
+        self._ax.set_title("Tournament Chip Stacks")
+        self._ax.set_xlabel("Hand")
+        self._ax.set_ylabel("Chips")
+        self._ax.legend(loc="upper left")
+        self._ax.grid(True, alpha=0.3)
+        self._fig.tight_layout()
+        self._fig.canvas.draw()
+        self._fig.canvas.flush_events()
 
-    plt.title("Tournament Chip Stacks")
-    plt.xlabel("Hand")
-    plt.ylabel("Chips")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(filename)
-    plt.show()
-    print(f"Tournament chart saved to {filename}")
+        self._hands: List[int] = []
+        self._stacks: Dict[str, List[int]] = {pid: [] for pid in player_ids}
+
+    def update(self, chip_history: List[Dict]):
+        """Redraw all lines from the full chip_history."""
+        self._hands = [entry["hand"] for entry in chip_history]
+
+        for pid, line in self._lines.items():
+            y = [entry.get(pid, 0) for entry in chip_history]
+            self._stacks[pid] = y
+            line.set_data(self._hands, y)
+
+        self._ax.set_xlim(0, max(self._hands) if self._hands else 1)
+        all_chips = [c for vals in self._stacks.values() for c in vals]
+        self._ax.set_ylim(0, max(all_chips) * 1.1 if all_chips else 1)
+        self._ax.legend(loc="upper left")
+
+        self._fig.canvas.draw()
+        self._fig.canvas.flush_events()
+
+    def finish(self, filename: str = "tournament_results.png"):
+        """Save final chart and keep window open for viewing."""
+        self._plt.ioff()
+        self._fig.savefig(filename)
+        print(f"Tournament chart saved to {filename}")
+        self._plt.show()
 
 if __name__ == "__main__":
     from .bot_api import PlayerView
@@ -750,4 +790,3 @@ if __name__ == "__main__":
     print("Final standings:")
     for pid, pos in sorted(result["results"].items(), key=lambda x: x[1]):
         print(f"  #{pos} {pid} (chips: {result['final_stacks'][pid]})")
-    plot_tournament(result["chip_history"])
