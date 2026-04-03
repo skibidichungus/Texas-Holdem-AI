@@ -220,10 +220,7 @@ class Table:
         # Ensure at least 2 active players
         active = [s for s in seats if s.chips > 0 and not s.is_sitting_out]
         if len(active) < 2:
-            # reset stacks if game needs reset
-            for s in seats:
-                s.chips = 200
-            active = [s for s in seats if s.chips > 0]
+            raise ValueError("Not enough active players to play a hand")
         assert 2 <= len(active) <= 10
 
         # Determine play order (dealer rotation)
@@ -656,17 +653,91 @@ class TournamentManager:
     def __init__(self, table: Table):
         self.table = table
 
-    def run(self, seats, bot_for, small_blind, big_blind, hands, dealer_index=0, on_event=None):
+    def run(self, seats, bot_for, small_blind, big_blind, dealer_index=0, on_event=None):
         seats = [s if isinstance(s, Seat) else Seat(**s) for s in seats]
-        n = len(seats)
+        active_seats = list(seats)
         dealer = dealer_index
-        nets = defaultdict(int)
-        for _ in range(hands):
-            res = self.table.play_hand(seats, small_blind, big_blind, dealer, bot_for, on_event=on_event)
-            for pid, v in res.items():
-                nets[pid] += v
-            dealer = (dealer + 1) % n
-        return dict(nets)
+        hand_number = 0
+        chip_history: List[Dict] = []
+        # finishing_order: list of (player_id, position) where position 1 = winner
+        finishing_order: List[Tuple[str, int]] = []
+        total_players = len(seats)
+
+        # Record initial chip snapshot
+        snapshot = {"hand": 0}
+        for s in seats:
+            snapshot[s.player_id] = s.chips
+        chip_history.append(snapshot)
+
+        while len(active_seats) > 1:
+            hand_number += 1
+            # Fix dealer index if it's out of range
+            dealer = dealer % len(active_seats)
+
+            self.table.play_hand(
+                active_seats, small_blind, big_blind, dealer, bot_for, on_event=on_event
+            )
+
+            # Record chip snapshot after this hand
+            snapshot = {"hand": hand_number}
+            for s in seats:
+                snapshot[s.player_id] = s.chips
+            chip_history.append(snapshot)
+
+            # Eliminate busted players (chips <= 0)
+            eliminated = [s for s in active_seats if s.chips <= 0]
+            for s in eliminated:
+                # Last place = total_players, first eliminated gets worst position
+                position = total_players - len(finishing_order)
+                finishing_order.append((s.player_id, position))
+                active_seats.remove(s)
+                print(f"  [ELIMINATED] {s.player_id} finishes in position {position}")
+
+            # Advance dealer
+            if active_seats:
+                dealer = (dealer + 1) % len(active_seats)
+
+        # The last player standing is the winner (position 1)
+        if active_seats:
+            finishing_order.append((active_seats[0].player_id, 1))
+            print(f"  [WINNER] {active_seats[0].player_id} wins the tournament!")
+
+        # Build results dict: player_id -> finishing position
+        results = {pid: pos for pid, pos in finishing_order}
+
+        return {
+            "results": results,
+            "chip_history": chip_history,
+            "hands_played": hand_number,
+            "final_stacks": {s.player_id: s.chips for s in seats},
+        }
+
+
+def plot_tournament(chip_history: List[Dict], filename: str = "tournament_results.png"):
+    """Plot chip stacks over time for each player in the tournament."""
+    import matplotlib.pyplot as plt
+
+    if not chip_history:
+        return
+
+    # Extract player IDs (all keys except "hand")
+    player_ids = [k for k in chip_history[0] if k != "hand"]
+    hands = [entry["hand"] for entry in chip_history]
+
+    plt.figure(figsize=(12, 6))
+    for pid in player_ids:
+        stacks = [entry.get(pid, 0) for entry in chip_history]
+        plt.plot(hands, stacks, label=pid, linewidth=2)
+
+    plt.title("Tournament Chip Stacks")
+    plt.xlabel("Hand")
+    plt.ylabel("Chips")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(filename)
+    plt.show()
+    print(f"Tournament chart saved to {filename}")
 
 if __name__ == "__main__":
     from .bot_api import PlayerView
@@ -674,10 +745,9 @@ if __name__ == "__main__":
     bots = {s.player_id: InProcessBot(RandomBot()) for s in seats}
     tbl = Table()
     tm = TournamentManager(tbl)
-    nets = tm.run(seats, bots, 1, 2, 5)
-    print("Final stacks:")
-    for s in seats:
-        print(f"  {s.player_id}: {s.chips}")
-    print("Net chips:")
-    for pid, v in nets.items():
-        print(f"  {pid}: {v:+}")
+    result = tm.run(seats, bots, 1, 2)
+    print(f"\nTournament finished after {result['hands_played']} hands")
+    print("Final standings:")
+    for pid, pos in sorted(result["results"].items(), key=lambda x: x[1]):
+        print(f"  #{pos} {pid} (chips: {result['final_stacks'][pid]})")
+    plot_tournament(result["chip_history"])
