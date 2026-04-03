@@ -23,34 +23,78 @@ Card = Tuple[str, str]
 def full_deck() -> List[Card]:
     return [(r, s) for r in RANKS for s in SUITS]
 
+def _score_five(cards: List[Card]) -> int:
+    """
+    Score exactly 5 cards. Higher = better.
+    Hand ranks (multiplied by a large prime to separate categories):
+      8 = straight flush, 7 = quads, 6 = full house, 5 = flush,
+      4 = straight, 3 = trips, 2 = two pair, 1 = pair, 0 = high card
+    """
+    from itertools import combinations as _comb
+    ranks = sorted([RANK_TO_INT[c[0]] for c in cards], reverse=True)
+    suits = [c[1] for c in cards]
+    is_flush = len(set(suits)) == 1
+
+    # Straight detection (including A-2-3-4-5 wheel)
+    is_straight = False
+    straight_high = 0
+    if ranks[0] - ranks[4] == 4 and len(set(ranks)) == 5:
+        is_straight = True
+        straight_high = ranks[0]
+    elif ranks == [12, 3, 2, 1, 0]:  # A-5-4-3-2 wheel
+        is_straight = True
+        straight_high = 3  # 5-high
+
+    from collections import Counter as _C
+    cnt = _C(ranks)
+    freq = sorted(cnt.values(), reverse=True)
+    groups = sorted(cnt.keys(), key=lambda r: (cnt[r], r), reverse=True)
+
+    # Category tiebreakers packed into a single int
+    # Each rank fits in 4 bits; pack up to 5 groups
+    def pack(g):
+        v = 0
+        for r in g:
+            v = v * 15 + r
+        return v
+
+    if is_straight and is_flush:
+        return (8 << 24) | straight_high
+    if freq == [4, 1]:
+        return (7 << 24) | pack(groups)
+    if freq == [3, 2]:
+        return (6 << 24) | pack(groups)
+    if is_flush:
+        return (5 << 24) | pack(ranks)
+    if is_straight:
+        return (4 << 24) | straight_high
+    if freq[0] == 3:
+        return (3 << 24) | pack(groups)
+    if freq[:2] == [2, 2]:
+        return (2 << 24) | pack(groups)
+    if freq[0] == 2:
+        return (1 << 24) | pack(groups)
+    return (0 << 24) | pack(ranks)
+
+
 def eval_hand(hole: List[Card], board: List[Card]) -> int:
     """
-    Evaluate a poker hand using the treys library.
-    Returns an integer where higher is better (range 1–7462).
-    Correctly ranks all standard hands: high card < pair < two pair < trips
-    < straight < flush < full house < quads < straight flush.
+    Pure-Python 5-card hand evaluator. No external dependencies.
+    Returns an integer where higher = better.
 
-    hole:  exactly 2 hole cards as (rank, suit) tuples, e.g. [('A','h'), ('K','s')]
-    board: 0–5 community cards in the same format.
-
-    When fewer than 3 board cards are available (preflop / early street in
-    feature estimation) a simple rank-based heuristic is returned instead,
-    because the treys evaluator requires at least 3 board cards.
+    Uses all combinations of hole + board cards and returns the best 5-card score.
+    Falls back to a simple preflop heuristic when fewer than 3 board cards exist.
     """
-    if len(board) >= 3:
-        from treys import Card as TreysCard, Evaluator
-        evaluator = Evaluator()
-        treys_hole  = [TreysCard.new(r + s) for r, s in hole]
-        treys_board = [TreysCard.new(r + s) for r, s in board]
-        # treys: 1 = best (royal flush), 7462 = worst → invert so higher = better
-        return 7463 - evaluator.evaluate(treys_board, treys_hole)
-    else:
-        # Preflop heuristic (no board yet): rank sum + pocket-pair bonus
-        ranks = [c[0] for c in hole]
-        base = sum(RANK_TO_INT.get(r, 0) for r in ranks)
-        if ranks[0] == ranks[1]:
-            base += 40          # pocket pair bonus
-        return base
+    from itertools import combinations
+    all_cards = list(hole) + list(board)
+    if len(all_cards) >= 5:
+        return max(_score_five(list(combo)) for combo in combinations(all_cards, 5))
+    # Preflop / early street heuristic
+    ranks = [c[0] for c in hole]
+    base = sum(RANK_TO_INT.get(r, 0) for r in ranks)
+    if len(ranks) == 2 and ranks[0] == ranks[1]:
+        base += 40
+    return base
 
 def _compute_to_call(contrib, alive_pids, pid):
     """
@@ -167,25 +211,30 @@ class InProcessBot(BotAdapter):
         self.bot = bot_obj
 
     def act(self, view: PlayerView) -> Action:
-        state = {
-            "street": view.street,
-            "position": view.position,
-            "hole_cards": view.hole_cards,
-            "board": view.board,
-            "pot": view.pot,
-            "to_call": view.to_call,
-            "min_raise": view.min_raise,
-            "max_raise": view.max_raise,
-            "legal_actions": view.legal_actions,
-            "stacks": view.stacks,
-            "me": view.me,
-            "opponents": view.opponents,
-            "history": view.history,
-        }
-        a = self.bot.act(state)
+        # Pass PlayerView directly; bots that still expect a dict get one via fallback
+        try:
+            a = self.bot.act(view)
+        except AttributeError:
+            # Legacy bot expects a dict — convert for backwards compatibility
+            state = {
+                "street": view.street,
+                "position": view.position,
+                "hole_cards": view.hole_cards,
+                "board": view.board,
+                "pot": view.pot,
+                "to_call": view.to_call,
+                "min_raise": view.min_raise,
+                "max_raise": view.max_raise,
+                "legal_actions": view.legal_actions,
+                "stacks": view.stacks,
+                "me": view.me,
+                "opponents": view.opponents,
+                "history": view.history,
+            }
+            a = self.bot.act(state)
+
         t = a.get("type") if isinstance(a, dict) else getattr(a, "type", None)
         amt = a.get("amount") if isinstance(a, dict) else getattr(a, "amount", None)
-
         return Action(t, amt)
 
 class RandomBot:
@@ -250,9 +299,9 @@ class Table:
         post_blind("BB", bb_idx, big_blind)
 
         # Shuffle and deal
-        deck = full_deck()
-        self.rng.shuffle(deck)
-        hole = {seats[idx].player_id: [deck.pop(), deck.pop()] for idx in ring}
+        self._deck = full_deck()
+        self.rng.shuffle(self._deck)
+        hole = {seats[idx].player_id: [self._deck.pop(), self._deck.pop()] for idx in ring}
         board: List[Card] = []
         history: List[Any] = []
 
@@ -348,21 +397,16 @@ class Table:
         return self._betting_round(*a, **k)
 
     def _pop_card(self):
-        deck = getattr(self, "_deck", None)
-        if not deck or len(deck) < 10:
-            self._deck = full_deck()
-            random.shuffle(self._deck)
-            deck = self._deck
-        return deck.pop()
+        return self._deck.pop()
 
     def _betting_round(
         self, street, seats, ring, pos_by_pid, hole, board, contrib, pot, bb,
         bot_for, history, on_event, logger
     ):
-        print(f"\n=== BETTING ROUND START: {street} ===")
-        print(f"Pot before street: {pot}")
-        print("Ring order:", [seats[i].player_id for i in ring])
-        print("Initial contrib:", {s.player_id: contrib.get(s.player_id, 0) for s in seats})
+        # print(f"\n=== BETTING ROUND START: {street} ===")
+        # print(f"Pot before street: {pot}")
+        # print("Ring order:", [seats[i].player_id for i in ring])
+        # print("Initial contrib:", {s.player_id: contrib.get(s.player_id, 0) for s in seats})
 
         # Ensure contrib entries
         if not contrib:
@@ -414,11 +458,11 @@ class Table:
         while True:
             safety += 1
             if safety > 500:
-                print("!!! SAFETY BREAK in betting_round")
+                # print("!!! SAFETY BREAK in betting_round")
                 break
 
             if num_players_can_act() == 0:
-                print("No players able to act → ending round")
+                # print("No players able to act → ending round")
                 break
 
             si = ring[idx]
@@ -429,7 +473,6 @@ class Table:
             if folded[pid] or allin[pid] or seat.chips <= 0:
                 idx = (idx + 1) % len(ring)
                 if all_live_equal():
-                    print("All live equal → ending street")
                     break
                 continue
 
@@ -462,8 +505,8 @@ class Table:
                             "max": max_total,
                         })
 
-            print(f"[{street}] Acting: {pid} | chips={seat.chips} contrib={contrib[pid]} to_call={to_call}")
-            print("    Legal:", legal)
+            # print(f"[{street}] Acting: {pid} | chips={seat.chips} contrib={contrib[pid]} to_call={to_call}")
+            # print("    Legal:", legal)
 
             # PlayerView
             if to_call == 0:
@@ -537,7 +580,7 @@ class Table:
                 action_amt = None
 
             action = Action(action_type, action_amt)
-            print(f"    Chosen action: {action.type} {action.amount}")
+            # print(f"    Chosen action: {action.type} {action.amount}")
 
             # Add to history BEFORE modifying contrib
             history.append({
@@ -552,7 +595,7 @@ class Table:
             if action.type == "fold":
                 folded[pid] = True
                 hole[pid] = []
-                print(f"    {pid} FOLDS")
+                # print(f"    {pid} FOLDS")
 
             elif action.type == "call":
                 need = min(seat.chips, to_call)
@@ -560,10 +603,10 @@ class Table:
                 contrib[pid] += need
                 if seat.chips <= 0:
                     allin[pid] = True
-                print(f"    {pid} CALLS {need}")
+                # print(f"    {pid} CALLS {need}")
 
             elif action.type == "check":
-                print(f"    {pid} CHECKS")
+                pass  # nothing to do for a check
 
             elif action.type in ("bet", "raise"):
                 prev_bet = max(contrib.values())
@@ -586,22 +629,22 @@ class Table:
                     if raise_sz > 0:
                         last_raise_size = raise_sz
 
-                print(f"    {pid} {action.type.upper()} to {target_total} (paid {need})")
+                # print(f"    {pid} {action.type.upper()} to {target_total} (paid {need})")
 
             if all_live_equal():
-                print("All live equal → ending street")
+                # print("All live equal → ending street")
                 break
             if num_players_can_act() == 0:
-                print("No one left who can act → ending street")
+                # print("No one left who can act → ending street")
                 break
 
             idx = (idx + 1) % len(ring)
 
         alive = [seats[i].player_id for i in ring if not folded[seats[i].player_id]]
-        print(f"=== BETTING ROUND END: {street} | Alive: {alive} ===")
+        # print(f"=== BETTING ROUND END: {street} | Alive: {alive} ===")
 
         if len(alive) == 1:
-            print(f"--> Winner by fold on {street}: {alive[0]}")
+            # print(f"--> Winner by fold on {street}: {alive[0]}")
             return alive[0]
         return None
 
@@ -733,6 +776,8 @@ class LiveTournamentGraph:
     """Real-time matplotlib graph that updates after every hand."""
 
     def __init__(self, player_ids: List[str]):
+        import matplotlib
+        matplotlib.use("macosx")
         import matplotlib.pyplot as plt
         self._plt = plt
 
