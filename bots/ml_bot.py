@@ -1,5 +1,4 @@
 import torch
-import random
 from core.bot_api import Action
 from core.engine import eval_hand
 from models.poker_mlp import PokerMLP
@@ -33,16 +32,19 @@ def _as_view(state):
 # ML BOT -------------------------------------------------------------
 
 class MLBot:
-    def __init__(self, model_path="models/ml_model.pt", device="cpu", use_fallback=True):
+    def __init__(self, model_path="models/ml_model.pt", device="cpu",
+                 use_fallback=True, temperature=0.8, training_mode=False):
         self.device = device
         self.use_fallback = use_fallback
-        self.model = PokerMLP(input_dim=26, hidden=128, num_classes=6)  # Changed from 23 to 26
+        self.temperature = temperature
+        self.training_mode = training_mode
+        self.model = PokerMLP(input_dim=26, hidden=128, num_classes=6)
         self.model_trained = False
-        
+
         # SHORT-TERM MEMORY: Track opponent behavior during this tournament
-        self.opponent_stats = {}  # opponent_id -> stats dict
+        self.opponent_stats = {}  # opponent_id -> running stats dict
         self.hand_history = []  # Recent hands in this tournament
-        
+
         try:
             checkpoint = torch.load(model_path, map_location=device)
             # Check if model dimensions match
@@ -107,27 +109,25 @@ class MLBot:
             else:
                 board_enc.extend([0, 0])  # Padding
 
-        # NEW: Hand strength estimate
+        # Hand strength estimate
         hand_strength = self._estimate_hand_strength(hole, board)
 
-        # NEW: Pot odds
+        # Pot odds
         if pot + to_call > 0:
             pot_odds = to_call / (pot + to_call)
         else:
             pot_odds = 0.0
-        
+
         # Position encoding (0.0 = early/tight, 1.0 = late/loose)
         position_order = {
             "UTG": 0.0, "UTG+1": 0.1, "MP": 0.3, "LJ": 0.4,
-            "HJ": 0.6, "CO": 0.8, "BTN": 1.0, "SB": 0.7, "BB": 0.5
+            "HJ": 0.6, "CO": 0.8, "BTN": 1.0, "SB": 0.5, "BB": 0.3
         }
         position_value = position_order.get(state.position, 0.5)
 
-        # NEW: Calculate memory features from opponent history
+        # Calculate memory features from running opponent stats
         opponents = state.opponents
-        memory_features = self._calculate_memory_features_from_history(
-            state.history, me=state.me, opponents=opponents
-        )
+        memory_features = self._calculate_memory_features(opponents)
 
         # FULL 26-feature vector
         features = (
@@ -142,7 +142,7 @@ class MLBot:
         return x.to(self.device)
 
     def _estimate_hand_strength(self, hole, board):
-        """Hand strength estimate using the treys evaluator (0.0–1.0)."""
+        """Hand strength estimate using the treys evaluator (0.0-1.0)."""
         if not hole or len(hole) < 2:
             return 0.0
         score = eval_hand(hole, board)
@@ -155,9 +155,9 @@ class MLBot:
         state = _as_view(state)
         legal = state.legal_actions
 
-        # Update memory from history
+        # Update running opponent stats from history
         if hasattr(state, 'history') and state.history:
-            self._update_memory_from_history(state.history, state.opponents)
+            self._update_opponent_stats(state.history, state.opponents)
 
         # If model not trained and fallback enabled, use fallback
         if not self.model_trained and self.use_fallback:
@@ -168,14 +168,26 @@ class MLBot:
 
         # Predict class
         logits = self.model(x)
-        pred = int(logits.argmax(dim=1).item())
-        
-        # Get confidence (softmax probability)
-        probs = torch.softmax(logits, dim=1)[0]
+
+        # Temperature-scaled softmax for exploration (non-training mode)
+        if not self.training_mode and self.temperature != 1.0:
+            scaled_logits = logits / self.temperature
+        else:
+            scaled_logits = logits
+
+        probs = torch.softmax(scaled_logits, dim=1)[0]
+
+        if self.training_mode:
+            # Training: always argmax
+            pred = int(probs.argmax().item())
+        else:
+            # Inference: sample from temperature-scaled distribution
+            pred = int(torch.multinomial(probs, 1).item())
+
         confidence = float(probs[pred].item())
 
         # If low confidence and fallback enabled, use fallback
-        if self.use_fallback and confidence < 0.4:
+        if self.use_fallback and confidence < 0.5:
             return self._fallback_strategy(state)
 
         # -------- handle buckets --------
@@ -239,108 +251,101 @@ class MLBot:
                 return self._choose("fold", legal)
             if strength < 0.55:
                 return self._choose("call", legal)
-            return self._raise(pot, legal)
+            return self._raise_fallback(pot, legal)
 
         # No bet yet
         if strength > 0.60:
-            return self._bet(pot, legal)
+            return self._bet_fallback(pot, legal)
         return self._choose("check", legal)
 
-    def _calculate_memory_features_from_history(self, history, me, opponents):
+    def _raise_fallback(self, pot, legal):
+        """Raise helper for fallback strategy."""
+        for a in legal:
+            if a["type"] == "raise":
+                amt = max(a["min"], min(a["max"], int(pot * 0.75)))
+                return Action("raise", amt)
+        return self._choose("call", legal)
+
+    def _bet_fallback(self, pot, legal):
+        """Bet helper for fallback strategy."""
+        for a in legal:
+            if a["type"] == "bet":
+                amt = max(a["min"], min(a["max"], int(pot * 0.5)))
+                return Action("bet", amt)
+        return self._choose("check", legal)
+
+    def _calculate_memory_features(self, opponents):
         """
-        Calculate opponent behavior features from the current hand's history.
-        Returns [avg_aggression, avg_tightness, avg_vpip]
-        Uses the history from the current hand to track opponent actions.
+        Calculate opponent behavior features from running stats.
+        Returns [avg_aggression, avg_tightness, avg_vpip].
+        Uses all accumulated stats across hands, not just last N actions.
         """
-        if not opponents or not history:
+        if not opponents or not self.opponent_stats:
             return [0.5, 0.5, 0.5]  # Neutral values
-        
-        # Extract opponent actions from current hand history
-        opponent_actions = []
-        for entry in history:
-            if isinstance(entry, dict):
-                player = entry.get("pid")
-                action = entry.get("action", {})
-                if player in opponents and isinstance(action, dict):
-                    opponent_actions.append({
-                        "player": player,
-                        "type": action.get("type", "fold")
-                    })
-        
-        # Also use our stored opponent stats from previous hands
-        if hasattr(self, 'opponent_stats') and self.opponent_stats:
-            for opp_id in opponents:
-                if opp_id in self.opponent_stats:
-                    stats = self.opponent_stats[opp_id]
-                    # Add to opponent_actions for calculation
-                    for _ in range(int(stats.get('action_count', 0))):
-                        if stats.get('last_action'):
-                            opponent_actions.append({
-                                "player": opp_id,
-                                "type": stats['last_action']
-                            })
-        
-        if not opponent_actions:
-            return [0.5, 0.5, 0.5]  # No history yet
-        
-        # Calculate stats from recent actions (last 10)
-        recent = opponent_actions[-10:]
-        total_actions = len(recent)
-        
-        if total_actions == 0:
+
+        total_aggression = 0.0
+        total_tightness = 0.0
+        total_vpip = 0.0
+        counted = 0
+
+        for opp_id in opponents:
+            if opp_id in self.opponent_stats:
+                stats = self.opponent_stats[opp_id]
+                total = stats['action_count']
+                if total > 0:
+                    total_aggression += stats['aggressive_count'] / total
+                    total_tightness += stats['fold_count'] / total
+                    total_vpip += stats['vpip_count'] / total
+                    counted += 1
+
+        if counted == 0:
             return [0.5, 0.5, 0.5]
-        
-        aggressive_count = sum(1 for d in recent 
-                              if d.get("type") in ("bet", "raise"))
-        fold_count = sum(1 for d in recent 
-                        if d.get("type") == "fold")
-        vpip_count = sum(1 for d in recent 
-                        if d.get("type") in ("call", "bet", "raise", "check"))
-        
-        avg_aggression = aggressive_count / total_actions
-        avg_tightness = fold_count / total_actions
-        avg_vpip = vpip_count / total_actions
-        
-        return [avg_aggression, avg_tightness, avg_vpip]
 
-    def _calculate_memory_features(self, all_decisions, current_idx, me, opponents, current_file):
-        """
-        DEPRECATED: Old method that required hand_id and log_file.
-        Kept for backwards compatibility but not used.
-        """
-        # Fallback to history-based calculation
-        return [0.5, 0.5, 0.5]
+        return [
+            total_aggression / counted,
+            total_tightness / counted,
+            total_vpip / counted,
+        ]
 
-    def _update_memory_from_history(self, history, opponents):
+    def _update_opponent_stats(self, history, opponents):
         """
-        Update opponent stats from current hand's history.
+        Update running opponent stats from current hand's history.
+        Tracks cumulative stats across all hands with deduplication.
         """
         if not history or not opponents:
             return
-        
+
         for entry in history:
-            if isinstance(entry, dict):
-                player = entry.get("pid")
-                action = entry.get("action", {})
-                if player in opponents and isinstance(action, dict):
-                    action_type = action.get("type", "fold")
-                    
-                    if player not in self.opponent_stats:
-                        self.opponent_stats[player] = {
-                            'action_count': 0,
-                            'aggressive_count': 0,
-                            'fold_count': 0,
-                            'vpip_count': 0,
-                            'last_action': action_type
-                        }
-                    
-                    stats = self.opponent_stats[player]
-                    stats['action_count'] += 1
-                    stats['last_action'] = action_type
-                    
-                    if action_type in ("bet", "raise"):
-                        stats['aggressive_count'] += 1
-                    if action_type == "fold":
-                        stats['fold_count'] += 1
-                    if action_type in ("call", "bet", "raise", "check"):
-                        stats['vpip_count'] += 1
+            if not isinstance(entry, dict):
+                continue
+            player = entry.get("pid")
+            action = entry.get("action", {})
+            if player not in opponents or not isinstance(action, dict):
+                continue
+
+            action_type = action.get("type", "fold")
+
+            if player not in self.opponent_stats:
+                self.opponent_stats[player] = {
+                    'action_count': 0,
+                    'aggressive_count': 0,
+                    'fold_count': 0,
+                    'vpip_count': 0,
+                    '_seen_entries': set(),
+                }
+
+            # Deduplicate: avoid re-counting entries we've already processed
+            entry_key = (player, action_type, entry.get("street", ""), entry.get("seq", id(entry)))
+            stats = self.opponent_stats[player]
+            if entry_key in stats['_seen_entries']:
+                continue
+            stats['_seen_entries'].add(entry_key)
+
+            stats['action_count'] += 1
+
+            if action_type in ("bet", "raise"):
+                stats['aggressive_count'] += 1
+            if action_type == "fold":
+                stats['fold_count'] += 1
+            if action_type in ("call", "bet", "raise", "check"):
+                stats['vpip_count'] += 1

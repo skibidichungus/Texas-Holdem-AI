@@ -21,7 +21,7 @@ STREET_MAP = {"preflop":0, "flop":1, "turn":2, "river":3}
 
 
 def encode_card(card):
-    """Convert ['A','h'] → [14, 2]"""
+    """Convert ['A','h'] -> [14, 2]"""
     rank, suit = card
     return [RANKS[rank], SUITS[suit]]
 
@@ -41,13 +41,13 @@ def bucket_raise(chosen, legal):
         mn = legal.get("min", None)
         mx = legal.get("max", None)
 
-        # if ANYTHING is missing or weird → put everything into one bucket (label 3)
+        # if ANYTHING is missing or weird -> put everything into one bucket (label 3)
         if amt is None or mn is None or mx is None or mn >= mx:
             return 3
 
-        # scale raise sizes across 5 buckets (labels 3–8)
+        # scale raise sizes across 5 buckets (labels 3-8)
         bucket = int((amt - mn) / max(1, (mx - mn)) * 5)
-        bucket = max(0, min(bucket, 4))  # clamp 0–4
+        bucket = max(0, min(bucket, 4))  # clamp 0-4
         return 3 + bucket
 
     # fallback bucket instead of returning None
@@ -104,7 +104,7 @@ class PokerDataset(Dataset):
             filter_winners_only: If True, only include decisions from hands that were won
         """
         self.samples = []
-        
+
         # Load all decisions first to build memory context
         all_decisions = []  # Will store all decisions in order
         for path in glob.glob(f"{log_folder}/**/*.jsonl", recursive=True):
@@ -122,7 +122,7 @@ class PokerDataset(Dataset):
                             all_decisions.append(row)
                     except:
                         continue
-        
+
         # Load hand results to track winners
         hand_results = {}  # hand_id -> winner player_id
         if filter_winners_only:
@@ -142,12 +142,12 @@ class PokerDataset(Dataset):
         for decision_idx, row in enumerate(all_decisions):
             if "chosen_action" not in row:
                 continue
-            
+
             # Filter by player
             player_id = row.get("player")
             if filter_players and player_id not in filter_players:
                 continue
-            
+
             # Filter by winner
             if filter_winners_only:
                 hand_id = row.get("hand_id")
@@ -207,7 +207,7 @@ class PokerDataset(Dataset):
             hero_stack = float(stacks[me])
             eff_stack = min(float(v) for v in stacks.values())
             n_players = len([v for v in stacks.values() if v > 0])
-            
+
             # Hand strength
             if hole and len(hole) >= 2:
                 from core.engine import eval_hand
@@ -215,13 +215,13 @@ class PokerDataset(Dataset):
                 hand_strength = min(1.0, score / 7462.0)
             else:
                 hand_strength = 0.0
-            
+
             # Pot odds
             if pot + to_call > 0:
                 pot_odds = to_call / (pot + to_call)
             else:
                 pot_odds = 0.0
-            
+
             # Position encoding
             position_order = {
                 "UTG": 0.0, "UTG+1": 0.1, "MP": 0.3, "LJ": 0.4,
@@ -255,34 +255,34 @@ class PokerDataset(Dataset):
         """
         if not opponents:
             return [0.5, 0.5, 0.5]  # Neutral values
-        
+
         # Get previous decisions from same file (same tournament session)
         previous_decisions = [
             d for d in all_decisions[:current_idx]
             if d.get("_file") == current_file and d.get("player") in opponents
         ]
-        
+
         if not previous_decisions:
             return [0.5, 0.5, 0.5]  # No history yet
-        
+
         # Calculate stats from last 10 opponent actions
         recent = previous_decisions[-10:]
-        
+
         total_actions = len(recent)
         if total_actions == 0:
             return [0.5, 0.5, 0.5]
-        
-        aggressive_count = sum(1 for d in recent 
+
+        aggressive_count = sum(1 for d in recent
                               if d.get("chosen_action", {}).get("type") in ("bet", "raise"))
-        fold_count = sum(1 for d in recent 
+        fold_count = sum(1 for d in recent
                         if d.get("chosen_action", {}).get("type") == "fold")
-        vpip_count = sum(1 for d in recent 
+        vpip_count = sum(1 for d in recent
                         if d.get("chosen_action", {}).get("type") in ("call", "bet", "raise"))
-        
+
         avg_aggression = aggressive_count / total_actions
         avg_tightness = fold_count / total_actions
         avg_vpip = vpip_count / total_actions
-        
+
         return [avg_aggression, avg_tightness, avg_vpip]
 
     def __len__(self):
@@ -290,34 +290,31 @@ class PokerDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.samples[idx]
-    
-class PokerMLP(nn.Module):
-    def __init__(self, input_dim, hidden=256, num_classes=4):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden),
-            nn.ReLU(),
-            nn.Linear(hidden, hidden),
-            nn.ReLU(),
-            nn.Linear(hidden, num_classes)
-        )
 
-    def forward(self, x):
-        return self.net(x)
-    
 def train_model(
     model,
     train_loader,
     val_loader,
     lr=1e-3,
     epochs=8,
-    device="cpu"
+    device="cpu",
+    class_weights=None,
+    feature_mean=None,
+    feature_std=None,
 ):
     model = model.to(device)
-    
-    # Multi-class classification (fold, call, raise, check)
-    criterion = nn.CrossEntropyLoss()
+
+    # Class-weighted loss
+    if class_weights is not None:
+        class_weights = class_weights.to(device)
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="min", factor=0.5, patience=3, verbose=True
+    )
+
+    best_val_loss = float("inf")
+    best_state = None
 
     for epoch in range(1, epochs + 1):
         model.train()
@@ -325,6 +322,10 @@ def train_model(
 
         for x, y in train_loader:
             x, y = x.to(device), y.to(device)
+
+            # Apply feature normalization
+            if feature_mean is not None:
+                x = (x - feature_mean.to(device)) / (feature_std.to(device) + 1e-8)
 
             optimizer.zero_grad()
             logits = model(x)
@@ -345,6 +346,10 @@ def train_model(
         with torch.no_grad():
             for x, y in val_loader:
                 x, y = x.to(device), y.to(device)
+
+                if feature_mean is not None:
+                    x = (x - feature_mean.to(device)) / (feature_std.to(device) + 1e-8)
+
                 logits = model(x)
                 loss = criterion(logits, y)
                 val_loss += loss.item()
@@ -356,12 +361,64 @@ def train_model(
         avg_val = val_loss / len(val_loader) if len(val_loader) > 0 else 0.0
         accuracy = 100 * correct / total if total > 0 else 0.0
 
+        # LR scheduling
+        scheduler.step(avg_val)
+        current_lr = optimizer.param_groups[0]["lr"]
+
         print(f"Epoch {epoch}/{epochs} | "
               f"Train Loss: {avg_train:.4f} | "
               f"Val Loss: {avg_val:.4f} | "
-              f"Val Acc:  {accuracy:.2f}%")
+              f"Val Acc:  {accuracy:.2f}% | "
+              f"LR: {current_lr:.2e}")
+
+        # Model checkpointing: save best
+        if avg_val < best_val_loss:
+            best_val_loss = avg_val
+            best_state = {k: v.clone() for k, v in model.state_dict().items()}
+            save_dir = os.path.join(project_root, "models")
+            os.makedirs(save_dir, exist_ok=True)
+            torch.save(best_state, os.path.join(save_dir, "ml_model_best.pt"))
+            print(f"  -> New best model saved (val_loss={avg_val:.4f})")
+
+    # Restore best weights for return
+    if best_state is not None:
+        model.load_state_dict(best_state)
 
     return model
+
+
+def compute_confusion_matrix(model, loader, num_classes, device, feature_mean, feature_std):
+    """Compute and print per-class accuracy (confusion matrix)."""
+    ACTION_NAMES = ["fold", "check", "call", "raise_small", "raise_med", "raise_large"]
+    confusion = torch.zeros(num_classes, num_classes, dtype=torch.long)
+
+    model.eval()
+    with torch.no_grad():
+        for x, y in loader:
+            x, y = x.to(device), y.to(device)
+            if feature_mean is not None:
+                x = (x - feature_mean.to(device)) / (feature_std.to(device) + 1e-8)
+            preds = model(x).argmax(dim=1)
+            for t, p in zip(y, preds):
+                confusion[t.item(), p.item()] += 1
+
+    print("\n" + "=" * 60)
+    print("CONFUSION MATRIX  (rows=true, cols=predicted)")
+    print("=" * 60)
+
+    header = f"{'':>14s}" + "".join(f"{n:>10s}" for n in ACTION_NAMES)
+    print(header)
+    for i, name in enumerate(ACTION_NAMES):
+        row_total = confusion[i].sum().item()
+        acc = 100 * confusion[i, i].item() / row_total if row_total > 0 else 0.0
+        row_str = f"{name:>14s}" + "".join(f"{confusion[i,j].item():>10d}" for j in range(num_classes))
+        row_str += f"  | acc {acc:5.1f}%  (n={row_total})"
+        print(row_str)
+
+    total_correct = sum(confusion[i, i].item() for i in range(num_classes))
+    total_samples = confusion.sum().item()
+    print(f"\nOverall accuracy: {100*total_correct/total_samples:.2f}% ({total_correct}/{total_samples})")
+
 
 if __name__ == "__main__":
     import argparse
@@ -382,23 +439,18 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     print("Loading logs...")
-    logs = load_decision_logs(args.log_dir)
-    print(f"Loaded {len(logs)} decisions.")
-
     dataset = PokerDataset(
-        args.log_dir,
+        log_folder=args.log_dir,
         filter_players=args.filter_players,
         filter_winners_only=args.filter_winners
     )
 
     if len(dataset) == 0:
         print(f"Error: No training data found in {args.log_dir}")
-        print("Please run some games first to generate logs.")
         sys.exit(1)
 
-    # 90% training / 10% validation
-    val_size = max(1, int(0.10 * len(dataset)))
-    train_size = len(dataset) - val_size
+    train_size = int(0.8 * len(dataset))
+    val_size = len(dataset) - train_size
     train_data, val_data = random_split(dataset, [train_size, val_size])
 
     train_loader = DataLoader(train_data, batch_size=args.batch, shuffle=True)

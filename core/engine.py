@@ -8,6 +8,7 @@ Now with:
 """
 from __future__ import annotations
 import random
+import warnings
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 from collections import defaultdict, deque
@@ -214,8 +215,11 @@ class InProcessBot(BotAdapter):
         # Pass PlayerView directly; bots that still expect a dict get one via fallback
         try:
             a = self.bot.act(view)
-        except AttributeError:
+        except (AttributeError, TypeError, Exception) as e:
             # Legacy bot expects a dict — convert for backwards compatibility
+            warnings.warn(
+                f"Bot for {view.me} failed with {type(e).__name__}: {e}, using dict fallback"
+            )
             state = {
                 "street": view.street,
                 "position": view.position,
@@ -238,8 +242,11 @@ class InProcessBot(BotAdapter):
         return Action(t, amt)
 
 class RandomBot:
-    def act(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        legal = state["legal_actions"]
+    def act(self, state) -> Dict[str, Any]:
+        if isinstance(state, PlayerView) or hasattr(state, "legal_actions"):
+            legal = state.legal_actions
+        else:
+            legal = state["legal_actions"]
         choice = random.choice(legal)
         if choice["type"] in ("bet", "raise"):
             lo, hi = choice["min"], choice["max"]
@@ -777,7 +784,12 @@ class LiveTournamentGraph:
 
     def __init__(self, player_ids: List[str]):
         import matplotlib
-        matplotlib.use("macosx")
+        for backend in ("macosx", "TkAgg", "Agg"):
+            try:
+                matplotlib.use(backend)
+                break
+            except Exception:
+                continue
         import matplotlib.pyplot as plt
         self._plt = plt
 
@@ -824,14 +836,3 @@ class LiveTournamentGraph:
         print(f"Tournament chart saved to {filename}")
         self._plt.show()
 
-if __name__ == "__main__":
-    from .bot_api import PlayerView
-    seats = [Seat(player_id=f"P{i+1}", chips=200) for i in range(3)]
-    bots = {s.player_id: InProcessBot(RandomBot()) for s in seats}
-    tbl = Table()
-    tm = TournamentManager(tbl)
-    result = tm.run(seats, bots, 1, 2)
-    print(f"\nTournament finished after {result['hands_played']} hands")
-    print("Final standings:")
-    for pid, pos in sorted(result["results"].items(), key=lambda x: x[1]):
-        print(f"  #{pos} {pid} (chips: {result['final_stacks'][pid]})")

@@ -1,175 +1,164 @@
-# run_tournament_stats.py
-# Run multiple tournaments and track win rates
+# run_tournament_stats.py — Run multiple tournaments and track detailed statistics
 
-from core.engine import Table, TournamentManager, Seat, InProcessBot
-from core.bot_api import BotAdapter, PlayerView, Action
-from bots.poker_mind_bot import SmartBot
-from bots.monte_carlo_bot import MonteCarloBot
-from bots.ml_bot import MLBot
-from bots.rl_bot import RLBot  # Add RLBot
+import argparse
+import csv
+import io
+import os
+import random
 from collections import defaultdict
-import sys
+from contextlib import redirect_stdout
+from multiprocessing import Pool
+
+from core.engine import Table, Seat
+from bots import parse_players, escalate_blinds, create_bot
 
 
-def run_silent_tournament(seats, bots, small_blind, big_blind):
+# ── Single silent tournament ──────────────────────────────────────────────────
+
+def run_silent_tournament(args_tuple):
+    """Run one tournament silently. Accepts a tuple for multiprocessing.Pool.map.
+
+    Returns dict with: winner, hand_count, finish_order [(pid, position, hand#, chips_at_elim)].
     """
-    Run tournament silently (no output) and return winner.
-    """
+    player_specs, chips, base_sb, base_bb, blind_increase_every, max_hands, seed = args_tuple
+
+    if seed is not None:
+        random.seed(seed)
+
+    # Rebuild bots in this process (can't pickle adapters across processes)
+    bots = {}
+    for pid, btype, _ in player_specs:
+        bots[pid] = create_bot(btype)
+
+    seats = [Seat(player_id=pid, chips=chips) for pid, _, _ in player_specs]
     table = Table()
-    tm = TournamentManager(table)
-    
-    hand_count = 0
     dealer_index = 0
-    
-    # Suppress print output
-    import io
-    from contextlib import redirect_stdout
-    
+    hand_count = 0
+    total_players = len(seats)
+    finish_order: list[tuple[str, int, int, int]] = []  # (pid, pos, hand#, chips_at_elim)
+
     with redirect_stdout(io.StringIO()):
         while True:
             active_players = [s for s in seats if s.chips > 0]
-            
             if len(active_players) <= 1:
-                winner = active_players[0].player_id if active_players else None
                 break
-            
+
             hand_count += 1
-            
+            sb, bb = escalate_blinds(hand_count, base_sb, base_bb, blind_increase_every)
             active_seats = [s for s in seats if s.chips > 0]
-            
-            class PlayerViewAdapter(BotAdapter):
-                def __init__(self, bot):
-                    self.bot = bot
-                def act(self, view: PlayerView) -> Action:
-                    return self.bot.act(view)
-            
-            active_bots = {}
-            for s in active_seats:
-                bot = bots[s.player_id]
-                # Handle MLBot and RLBot (both need InProcessBot)
-                if isinstance(bot, (MLBot, RLBot)):
-                    active_bots[s.player_id] = InProcessBot(bot)
-                else:
-                    active_bots[s.player_id] = PlayerViewAdapter(bot)
-            
-            res = table.play_hand(
+            active_bots = {s.player_id: bots[s.player_id] for s in active_seats}
+
+            table.play_hand(
                 seats=active_seats,
-                small_blind=small_blind,
-                big_blind=big_blind,
+                small_blind=sb,
+                big_blind=bb,
                 dealer_index=dealer_index % len(active_seats),
                 bot_for=active_bots,
-                on_event=None
+                on_event=None,
             )
-            
             dealer_index = (dealer_index + 1) % len(seats)
-            
-            if hand_count > 10000:
-                # Safety limit - return player with most chips
-                winner = max(seats, key=lambda s: s.chips).player_id
+
+            # Track eliminations
+            for s in seats:
+                if s.chips <= 0 and not any(e[0] == s.player_id for e in finish_order):
+                    pos = total_players - len(finish_order)
+                    finish_order.append((s.player_id, pos, hand_count, 0))
+
+            if hand_count >= max_hands:
                 break
-    
-    return winner, hand_count
 
+    # Winner / survivors
+    for s in seats:
+        if s.chips > 0 and not any(e[0] == s.player_id for e in finish_order):
+            finish_order.append((s.player_id, 1, hand_count, s.chips))
 
-def run_tournament_batch(num_tournaments=30, chips_per_player=500):
-    """
-    Run multiple tournaments and track statistics.
-    """
-    print("=" * 70)
-    print(f"RUNNING {num_tournaments} TOURNAMENTS")
-    print("=" * 70)
-    print(f"Chip stack per player: {chips_per_player}")
-    print(f"Bots: P1=RLBot, P2=MLBot, P3=SmartBot, P4=MonteCarloBot, P5=MonteCarloBot")
-    print("=" * 70)
-    print()
-    
-    wins = defaultdict(int)
-    total_hands = 0
-    hand_counts = []
-    
-    for tournament_num in range(1, num_tournaments + 1):
-        # Reset seats for each tournament - NOW 5 PLAYERS
-        seats = [Seat(player_id=f"P{i+1}", chips=chips_per_player) for i in range(5)]
-        
-        # Set up 5 bots (fresh instances)
-        bots = {
-            "P1": RLBot(training_mode=False),  # Trained RL bot
-            "P2": MLBot(),                     # ML bot
-            "P3": SmartBot(),                  # Smart bot
-            "P4": MonteCarloBot(),             # MonteCarlo bot
-            "P5": MonteCarloBot(simulations=150),  # Slightly different MonteCarlo
-        }
-        
-        # Debug: Check RLBot status (only print once)
-        if tournament_num == 1:
-            rl_bot = bots["P1"]
-            if hasattr(rl_bot, 'model_loaded'):
-                if rl_bot.model_loaded:
-                    print(f"RLBot: Model loaded successfully")
-                else:
-                    print(f"RLBot: Model NOT loaded, using fallback strategy")
-        
-        # Run tournament
-        winner, hands = run_silent_tournament(seats, bots, small_blind=1, big_blind=2)
-        
-        wins[winner] += 1
-        total_hands += hands
-        hand_counts.append(hands)
-        
-        # Progress update every 5 tournaments
-        if tournament_num % 5 == 0 or tournament_num == num_tournaments:
-            print(f"Tournament {tournament_num}/{num_tournaments} - Winner: {winner} ({hands} hands)")
-    
-    # Calculate statistics
-    print("\n" + "=" * 70)
-    print("TOURNAMENT STATISTICS")
-    print("=" * 70)
-    
-    print(f"\nTotal tournaments: {num_tournaments}")
-    print(f"Total hands played: {total_hands}")
-    print(f"Average hands per tournament: {total_hands / num_tournaments:.1f}")
-    
-    print("\n" + "-" * 70)
-    print("WIN RATES:")
-    print("-" * 70)
-    
-    bot_names = {
-        "P1": "RLBot",
-        "P2": "MLBot",
-        "P3": "SmartBot", 
-        "P4": "MonteCarloBot",
-        "P5": "MonteCarloBot2"
+    # If we hit max_hands, assign remaining positions by chip count
+    unfinished = [s for s in seats
+                  if not any(e[0] == s.player_id for e in finish_order)]
+    unfinished.sort(key=lambda s: s.chips, reverse=True)
+    next_pos = total_players - len(finish_order)
+    for s in unfinished:
+        finish_order.append((s.player_id, next_pos, hand_count, s.chips))
+        next_pos -= 1
+
+    winner = None
+    for pid, pos, _, _ in finish_order:
+        if pos == 1:
+            winner = pid
+            break
+    if winner is None and finish_order:
+        winner = finish_order[-1][0]
+
+    return {
+        "winner": winner,
+        "hand_count": hand_count,
+        "finish_order": finish_order,
     }
-    
-    # Iterate over all 5 players
-    for player_id in ["P1", "P2", "P3", "P4", "P5"]:
-        wins_count = wins[player_id]
-        win_rate = (wins_count / num_tournaments) * 100
-        bot_name = bot_names[player_id]
-        print(f"  {player_id} ({bot_name:15s}): {wins_count:3d} wins ({win_rate:5.1f}%)")
-    
-    print("\n" + "-" * 70)
-    print("HAND COUNT STATISTICS:")
-    print("-" * 70)
-    if hand_counts:
-        print(f"  Shortest tournament: {min(hand_counts)} hands")
-        print(f"  Longest tournament:  {max(hand_counts)} hands")
-        print(f"  Average:            {sum(hand_counts) / len(hand_counts):.1f} hands")
-    
-    print("\n" + "=" * 70)
-    
-    return wins, hand_counts
 
 
-if __name__ == "__main__":
-    import argparse
-    
-    parser = argparse.ArgumentParser(description="Run multiple tournaments and track win rates")
-    parser.add_argument("--tournaments", type=int, default=30, 
-                        help="Number of tournaments to run (default: 30)")
-    parser.add_argument("--chips", type=int, default=500,
-                        help="Starting chips per player (default: 500)")
-    
-    args = parser.parse_args()
-    
-    run_tournament_batch(num_tournaments=args.tournaments, chips_per_player=args.chips)
+# ── Batch runner ──────────────────────────────────────────────────────────────
+
+def run_tournament_batch(player_spec_str, num_tournaments, chips, base_sb, base_bb,
+                         blind_increase_every, max_hands, parallel, output_csv, seed):
+    player_specs = parse_players(player_spec_str)
+    if len(player_specs) < 2:
+        print("Error: need at least 2 players.")
+        return
+
+    pids = [pid for pid, _, _ in player_specs]
+    bot_types = {pid: btype for pid, btype, _ in player_specs}
+
+    print("=" * 75)
+    print(f"RUNNING {num_tournaments} TOURNAMENTS")
+    print("=" * 75)
+    print(f"Players: {', '.join(f'{pid}={btype}' for pid, btype, _ in player_specs)}")
+    print(f"Chips: {chips}  |  Blinds: {base_sb}/{base_bb}  |  "
+          f"Escalation every {blind_increase_every} hands")
+    if parallel > 1:
+        print(f"Parallel workers: {parallel}")
+    print("=" * 75)
+    print()
+
+    # Build args tuples for each tournament
+    tasks = []
+    for i in range(num_tournaments):
+        t_seed = (seed + i) if seed is not None else None
+        tasks.append((player_specs, chips, base_sb, base_bb,
+                      blind_increase_every, max_hands, t_seed))
+
+    # Run tournaments
+    results = []
+    if parallel > 1:
+        with Pool(processes=parallel) as pool:
+            for i, res in enumerate(pool.imap_unordered(run_silent_tournament, tasks), 1):
+                results.append(res)
+                if i % 5 == 0 or i == num_tournaments:
+                    print(f"  Completed {i}/{num_tournaments}...")
+    else:
+        for i, task in enumerate(tasks, 1):
+            res = run_silent_tournament(task)
+            results.append(res)
+            if i % 5 == 0 or i == num_tournaments:
+                winner = res["winner"]
+                hands = res["hand_count"]
+                print(f"  Tournament {i}/{num_tournaments} — Winner: {winner} ({hands} hands)")
+
+    # ── Aggregate statistics ──────────────────────────────────────────────────
+
+    wins = defaultdict(int)
+    finish_positions = defaultdict(list)       # pid -> [positions]
+    chips_at_elimination = defaultdict(list)   # pid -> [chips when eliminated]
+    hands_survived = defaultdict(list)         # pid -> [hand# when eliminated]
+    h2h_wins = defaultdict(lambda: defaultdict(int))  # pid_a -> pid_b -> count a beat b
+
+    hand_counts = []
+
+    for res in results:
+        hand_counts.append(res["hand_count"])
+        wins[res["winner"]] += 1
+
+        fo = res["finish_order"]  # [(pid, pos, hand#, chips)]
+
+        for pid, pos, hand, elim_chips in fo:
+            finish_positions[pid].append(pos)
+            hands_survived[pid].app
