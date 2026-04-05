@@ -80,7 +80,8 @@ SNAPSHOT_DEFAULT         = 500    # self-play snapshot interval
 
 def train_rl_bot_mixed(num_episodes=10_000, chips_per_player=500,
                        opponent_type="montecarlo", csv_path=None,
-                       lr_step_episodes=30_000, snapshot_every=SNAPSHOT_DEFAULT):
+                       lr_step_episodes=30_000, snapshot_every=SNAPSHOT_DEFAULT,
+                       checkpoint_path=""):
     """
     Train RL bot with a mixed opponent curriculum.
 
@@ -106,15 +107,15 @@ def train_rl_bot_mixed(num_episodes=10_000, chips_per_player=500,
           f"rolling WR > {SELFPLAY_WR_THRESHOLD:.0%}")
     print(f"Rolling window: {ROLLING_WINDOW} episodes")
     print(f"LR step every: {lr_step_episodes} episodes")
-    print(f"Loading checkpoint: models/rl_model_run1.pt")
+    print(f"Loading checkpoint: {checkpoint_path if checkpoint_path else '(none — starting fresh)'}")
     print("=" * 70)
     print()
 
-    # ── Create RL bot, loading from the run-1 checkpoint ─────────────
+    # ── Create RL bot, optionally loading from a checkpoint ─────────────
     rl_bot = RLBot(
         training_mode=True,
         learning_rate=3e-4,
-        model_path="models/rl_model_run1.pt",
+        model_path=checkpoint_path,
     )
 
     # LR scheduler bookkeeping
@@ -223,6 +224,9 @@ def train_rl_bot_mixed(num_episodes=10_000, chips_per_player=500,
 
             if "P2" in result:
                 rl_bot.record_reward(hand_reward)
+                # Survival bonus: small reward just for still being alive
+                if chips_after > 0:
+                    rl_bot.record_reward(0.02)
 
             dealer_index = (dealer_index + 1) % len(seats)
             hand_count += 1
@@ -243,6 +247,10 @@ def train_rl_bot_mixed(num_episodes=10_000, chips_per_player=500,
         # Terminal bonus
         final_bonus = 1.0 if won else -0.5
         rl_bot.record_reward(final_bonus)
+
+        # Early elimination penalty: punish getting knocked out quickly
+        if not won and hand_count < 50:
+            rl_bot.record_reward(-1.0)
 
         total_chips += final_chips_p2
         recent_rewards.append(final_reward)
@@ -306,7 +314,7 @@ def train_rl_bot_mixed(num_episodes=10_000, chips_per_player=500,
     rl_bot.flush_buffer()
 
     os.makedirs("models", exist_ok=True)
-    final_path = "models/rl_model_run2.pt"
+    final_path = "models/rl_model_mixed.pt"
     rl_bot.save_model(final_path)
     print(f"\nModel saved to {final_path}")
 
@@ -349,7 +357,10 @@ if __name__ == "__main__":
     parser.add_argument("--lr_step", type=int, default=30_000,
                         help="Reduce LR by 0.5x every N episodes (default: 30000)")
     parser.add_argument("--snapshot_every", type=int, default=500,
-                        help="Self-play snapshot interval (default: 500)")
+                        help="Self-play snapshot interval in episodes (default: 500)")
+    parser.add_argument("--checkpoint", type=str, default="",
+                        help="Path to load model weights from before training. "
+                             "Empty string starts fresh (default: '')")
     args = parser.parse_args()
 
     os.makedirs("output", exist_ok=True)
@@ -361,4 +372,5 @@ if __name__ == "__main__":
         csv_path=args.csv,
         lr_step_episodes=args.lr_step,
         snapshot_every=args.snapshot_every,
+        checkpoint_path=args.checkpoint,
     )
