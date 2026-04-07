@@ -79,6 +79,7 @@ class TournamentUI:
         self._cancel_event   = threading.Event()
         self._cancelled      = False
         self._btn_mode       = "play"  # "play" | "cancel" | "restart"
+        self._eliminations   = {}  # pid -> finishing position
 
         self._build_figure()
 
@@ -88,8 +89,8 @@ class TournamentUI:
         self.fig = plt.figure(figsize=(13, 7), facecolor="#1a1a2e")
         self.fig.canvas.manager.set_window_title("Texas Hold'em Tournament")
 
-        # Main chart area
-        self.ax = self.fig.add_axes([0.08, 0.18, 0.88, 0.72])
+        # Main chart area (narrowed to make room for leaderboard sidebar)
+        self.ax = self.fig.add_axes([0.08, 0.18, 0.57, 0.72])
         self.ax.set_facecolor("#16213e")
         self.ax.tick_params(colors="white")
         self.ax.xaxis.label.set_color("white")
@@ -120,7 +121,16 @@ class TournamentUI:
         self.ax.set_xlim(0, 10)
         self.ax.set_ylim(0, total_chips * 1.05)
         self.ax.legend(loc="upper left", facecolor="#1a1a2e",
-                       labelcolor="white", edgecolor="#444", fontsize=10)
+                       labelcolor="white", edgecolor="#444", fontsize=9)
+
+        # Leaderboard sidebar
+        self.lb_ax = self.fig.add_axes([0.69, 0.18, 0.29, 0.72])
+        self.lb_ax.set_facecolor("#16213e")
+        self.lb_ax.set_xticks([])
+        self.lb_ax.set_yticks([])
+        for spine in self.lb_ax.spines.values():
+            spine.set_visible(False)
+        self._draw_leaderboard()
 
         # Status label
         self.status_text = self.fig.text(
@@ -223,12 +233,14 @@ class TournamentUI:
 
     def _reset_to_play(self):
         """Reset all state and restore the chart to the initial ready state."""
-        self.chip_history = []
-        self.running = False
-        self.finished = False
-        self._cancelled = False
+        # Clear data state first so leaderboard reads clean values
+        self.chip_history  = []
+        self._eliminations = {}
+        self.running       = False
+        self.finished      = False
+        self._cancelled    = False
         self._cancel_event.clear()
-        self._winner_info = None
+        self._winner_info  = None
         self._current_blinds = (self.base_sb, self.base_bb)
         # Restore button to Play
         self._btn_mode = "play"
@@ -249,6 +261,15 @@ class TournamentUI:
         self.ax.set_ylim(0, total_chips * 1.05)
         self.blinds_text.set_text(
             f"Blinds: {self.base_sb}/{self.base_bb}")
+        # Explicitly wipe the leaderboard axes so no stale artists remain,
+        # then re-apply sidebar styling before the fresh draw
+        self.lb_ax.clear()
+        self.lb_ax.set_facecolor("#16213e")
+        self.lb_ax.set_xticks([])
+        self.lb_ax.set_yticks([])
+        for spine in self.lb_ax.spines.values():
+            spine.set_visible(False)
+        self._draw_leaderboard()
         self.fig.canvas.draw_idle()
 
     # ── Tournament loop ───────────────────────────────────────────────────────
@@ -306,6 +327,7 @@ class TournamentUI:
             for s in eliminated:
                 pos = total - len(finishing)
                 finishing.append((s.player_id, pos))
+                self._eliminations[s.player_id] = pos
                 active_seats.remove(s)
                 print(f"  [OUT] {s.player_id} — position {pos}")
 
@@ -319,6 +341,124 @@ class TournamentUI:
             winner = "?"
 
         self._signal_finish(winner, hand_num)
+
+    # ── Leaderboard ───────────────────────────────────────────────────────────
+
+    _ORDINALS = ["1st", "2nd", "3rd", "4th", "5th",
+                 "6th", "7th", "8th", "9th", "10th"]
+
+    def _ordinal(self, n: int) -> str:
+        if 1 <= n <= len(self._ORDINALS):
+            return self._ORDINALS[n - 1]
+        return f"{n}th"
+
+    def _draw_leaderboard(self):
+        ax = self.lb_ax
+        ax.clear()
+        ax.set_facecolor("#16213e")
+        ax.set_xticks([])
+        ax.set_yticks([])
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+
+        # Title
+        ax.text(0.5, 0.97, "Leaderboard",
+                ha="center", va="top",
+                fontsize=12, fontweight="bold", color="white",
+                transform=ax.transAxes)
+
+        # Separator line under title
+        ax.axhline(y=0.93, xmin=0.05, xmax=0.95,
+                   color="#444", linewidth=0.8)
+
+        # Build current chip snapshot
+        if self.chip_history:
+            snap = self.chip_history[-1]
+        else:
+            snap = {pid: self.starting_chips for pid in self.player_ids}
+
+        total_chips = self.starting_chips * len(self.player_ids)
+
+        # Sort: active players descending by chips, then eliminated by position asc
+        active  = [(pid, snap.get(pid, 0))
+                   for pid in self.player_ids
+                   if pid not in self._eliminations]
+        active.sort(key=lambda x: x[1], reverse=True)
+
+        eliminated = [(pid, self._eliminations[pid])
+                      for pid in self.player_ids
+                      if pid in self._eliminations]
+        eliminated.sort(key=lambda x: x[1])  # best finish first
+
+        rows = [(pid, snap.get(pid, 0), False) for pid, _ in active] + \
+               [(pid, 0,                True)  for pid, _ in eliminated]
+
+        n = len(rows)
+        # Vertical layout: spread rows between y=0.90 and y=0.02
+        row_h = 0.88 / max(n, 1)
+
+        for rank, (pid, chips, is_out) in enumerate(rows, start=1):
+            y_center = 0.90 - (rank - 0.5) * row_h
+            color    = self._eliminations_color(pid, is_out)
+            btype    = self.bot_types[pid]
+
+            # Rank label
+            ax.text(0.03, y_center, self._ordinal(rank),
+                    ha="left", va="center",
+                    fontsize=8, color="#888888",
+                    transform=ax.transAxes)
+
+            # Colored dot
+            dot_color = color if not is_out else "#555555"
+            ax.plot(0.18, y_center, "s",
+                    color=dot_color, markersize=7,
+                    transform=ax.transAxes, clip_on=False)
+
+            # Player name + bot type
+            name_color = color if not is_out else "#555555"
+            ax.text(0.25, y_center, f"{pid} ({btype})",
+                    ha="left", va="center",
+                    fontsize=8, color=name_color,
+                    transform=ax.transAxes)
+
+            if is_out:
+                # Finishing position
+                elim_pos = self._eliminations[pid]
+                ax.text(0.97, y_center,
+                        f"OUT ({self._ordinal(elim_pos)})",
+                        ha="right", va="center",
+                        fontsize=7.5, color="#555555",
+                        transform=ax.transAxes)
+            else:
+                # Chip count
+                ax.text(0.97, y_center + row_h * 0.18,
+                        f"{chips:,}",
+                        ha="right", va="center",
+                        fontsize=8, color="white",
+                        transform=ax.transAxes)
+                # Progress bar
+                bar_w = max(chips / total_chips, 0.0) * 0.72
+                bar_y = y_center - row_h * 0.25
+                bar_h = row_h * 0.18
+                # Background track
+                ax.add_patch(mpatches.FancyBboxPatch(
+                    (0.25, bar_y), 0.72, bar_h,
+                    boxstyle="round,pad=0",
+                    facecolor="#2a2a4a", edgecolor="none",
+                    transform=ax.transAxes, clip_on=False))
+                # Fill
+                if bar_w > 0:
+                    ax.add_patch(mpatches.FancyBboxPatch(
+                        (0.25, bar_y), bar_w, bar_h,
+                        boxstyle="round,pad=0",
+                        facecolor=self.colours[pid],
+                        edgecolor="none", alpha=0.75,
+                        transform=ax.transAxes, clip_on=False))
+
+    def _eliminations_color(self, pid: str, is_out: bool) -> str:
+        return self.colours.get(pid, "#ffffff")
 
     # ── Data flag ─────────────────────────────────────────────────────────────
 
@@ -376,6 +516,7 @@ class TournamentUI:
             self.play_btn.ax.set_facecolor("#0f3460")
             print(f"\nWinner: {winner}  ({hands_played} hands)")
 
+        self._draw_leaderboard()
         self.fig.canvas.draw_idle()
 
     # ── Entry point ───────────────────────────────────────────────────────────
