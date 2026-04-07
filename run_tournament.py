@@ -83,6 +83,8 @@ class TournamentUI:
         self._elimination_events = []   # [(pid, hand_num, finishing_pos), ...]
         self._elim_artists       = []   # matplotlib artists to remove each cycle
         self._summary_ax         = None  # overlay axes shown at tournament end
+        self._highlights         = []   # list of {hand, text, color, age} dicts
+        self._last_chip_leader   = None  # tracks chip leader for change detection
 
         self._build_figure()
 
@@ -92,8 +94,8 @@ class TournamentUI:
         self.fig = plt.figure(figsize=(13, 7), facecolor="#1a1a2e")
         self.fig.canvas.manager.set_window_title("Texas Hold'em Tournament")
 
-        # Main chart area (narrowed to make room for leaderboard sidebar)
-        self.ax = self.fig.add_axes([0.08, 0.18, 0.57, 0.72])
+        # Main chart area — centered between highlights sidebar (left) and leaderboard (right)
+        self.ax = self.fig.add_axes([0.22, 0.24, 0.44, 0.66])
         self.ax.set_facecolor("#16213e")
         self.ax.tick_params(colors="white")
         self.ax.xaxis.label.set_color("white")
@@ -126,14 +128,23 @@ class TournamentUI:
         self.ax.legend(loc="upper left", facecolor="#1a1a2e",
                        labelcolor="white", edgecolor="#444", fontsize=9)
 
-        # Leaderboard sidebar
-        self.lb_ax = self.fig.add_axes([0.69, 0.18, 0.29, 0.72])
+        # Leaderboard sidebar (right)
+        self.lb_ax = self.fig.add_axes([0.69, 0.24, 0.29, 0.66])
         self.lb_ax.set_facecolor("#16213e")
         self.lb_ax.set_xticks([])
         self.lb_ax.set_yticks([])
         for spine in self.lb_ax.spines.values():
             spine.set_visible(False)
         self._draw_leaderboard()
+
+        # Highlights feed sidebar (left)
+        self.feed_ax = self.fig.add_axes([0.02, 0.24, 0.18, 0.66])
+        self.feed_ax.set_facecolor("#16213e")
+        self.feed_ax.set_xticks([])
+        self.feed_ax.set_yticks([])
+        for spine in self.feed_ax.spines.values():
+            spine.set_visible(False)
+        self._draw_feed()
 
         # Status label
         self.status_text = self.fig.text(
@@ -254,6 +265,9 @@ class TournamentUI:
             except Exception:
                 pass
             self._summary_ax = None
+        # Clear highlights feed
+        self._highlights = []
+        self._last_chip_leader = None
         self.running       = False
         self.finished      = False
         self._cancelled    = False
@@ -288,6 +302,7 @@ class TournamentUI:
         for spine in self.lb_ax.spines.values():
             spine.set_visible(False)
         self._draw_leaderboard()
+        self._draw_feed()
         self.fig.canvas.draw_idle()
 
     # ── Tournament loop ───────────────────────────────────────────────────────
@@ -339,6 +354,7 @@ class TournamentUI:
             for pid in self.player_ids:
                 snap[pid] = by_pid[pid].chips
             self.chip_history.append(snap)
+            self._detect_highlights(hand_num)
             self._mark_dirty()
 
             eliminated = [s for s in active_seats if s.chips <= 0]
@@ -595,6 +611,7 @@ class TournamentUI:
             self._show_summary_overlay(winner, hands_played)
 
         self._draw_leaderboard()
+        self._draw_feed()
         self.fig.canvas.draw_idle()
 
     # ── Summary overlay ───────────────────────────────────────────────────────
@@ -605,7 +622,7 @@ class TournamentUI:
         if self._summary_ax is not None:
             return
 
-        ax = self.fig.add_axes([0.12, 0.25, 0.50, 0.58])
+        ax = self.fig.add_axes([0.24, 0.27, 0.40, 0.56])
         ax.set_facecolor("#1a1a2e")
         ax.patch.set_alpha(0.92)
         for spine in ax.spines.values():
@@ -703,6 +720,165 @@ class TournamentUI:
             ax.text(0.97, y, f"{hand_survived} hands",
                     ha="right", va="top",
                     fontsize=9, color="#888888",
+                    transform=ax.transAxes)
+
+    # ── Highlights feed ───────────────────────────────────────────────────────
+
+    def _detect_highlights(self, hand_num: int):
+        """Compare last two chip snapshots and append notable events."""
+        if len(self.chip_history) < 2:
+            return
+
+        prev = self.chip_history[-2]
+        curr = self.chip_history[-1]
+
+        # Age existing highlights
+        for h in self._highlights:
+            h["age"] += 1
+
+        deltas = {pid: curr.get(pid, 0) - prev.get(pid, 0)
+                  for pid in self.player_ids}
+
+        # Active players in each snapshot
+        prev_active = [pid for pid in self.player_ids if prev.get(pid, 0) > 0]
+        curr_active = [pid for pid in self.player_ids if curr.get(pid, 0) > 0]
+
+        curr_leader = (max(curr_active, key=lambda p: curr.get(p, 0))
+                       if curr_active else None)
+
+        avg_stack = (sum(prev.get(p, 0) for p in prev_active) / len(prev_active)
+                     if prev_active else self.starting_chips)
+
+        new_entries     = []
+        flagged_big_pot = set()
+        flagged_double  = set()
+
+        # 1. Eliminations
+        for pid in self.player_ids:
+            old_chips = prev.get(pid, 0)
+            new_chips = curr.get(pid, 0)
+            colour    = self.colours.get(pid, "white")
+            if old_chips > 0 and new_chips <= 0:
+                pos     = self._eliminations.get(pid, len(self.player_ids))
+                ordinal = self._ordinal(pos)
+                new_entries.append({
+                    "hand": hand_num,
+                    "text": f"#{hand_num} {pid} eliminated ({ordinal})",
+                    "color": colour,
+                    "age": 0,
+                })
+                flagged_big_pot.add(pid)
+                flagged_double.add(pid)
+
+        # 2. Chip leader change — compare against persistent tracker
+        if (curr_leader is not None
+                and curr_leader != self._last_chip_leader
+                and self._last_chip_leader is not None):
+            chips  = curr.get(curr_leader, 0)
+            colour = self.colours.get(curr_leader, "white")
+            new_entries.append({
+                "hand": hand_num,
+                "text": f"#{hand_num} {curr_leader} takes the lead! ({chips:,})",
+                "color": colour,
+                "age": 0,
+            })
+            flagged_big_pot.add(curr_leader)
+            flagged_double.add(curr_leader)
+        if curr_leader is not None:
+            self._last_chip_leader = curr_leader
+
+        # 3 & 4. Big pot / double-up (per player)
+        threshold = self.starting_chips * 0.25
+        for pid in self.player_ids:
+            if pid in flagged_big_pot:
+                continue
+            delta     = deltas[pid]
+            old_chips = prev.get(pid, 0)
+            new_chips = curr.get(pid, 0)
+            colour    = self.colours.get(pid, "white")
+
+            # Big pot
+            if delta > threshold:
+                new_entries.append({
+                    "hand": hand_num,
+                    "text": f"#{hand_num} {pid} wins +{delta:,} chips!",
+                    "color": colour,
+                    "age": 0,
+                })
+                flagged_double.add(pid)
+                continue
+
+            # Double-up
+            if pid in flagged_double:
+                continue
+            if (old_chips > 0
+                    and old_chips < avg_stack * 0.35
+                    and delta > 0
+                    and new_chips >= old_chips * 1.8):
+                new_entries.append({
+                    "hand": hand_num,
+                    "text": f"#{hand_num} {pid} doubles up! ({old_chips:,}→{new_chips:,})",
+                    "color": colour,
+                    "age": 0,
+                })
+
+        self._highlights.extend(new_entries)
+        if len(self._highlights) > 30:
+            self._highlights = self._highlights[-30:]
+
+    def _draw_feed(self):
+        """Redraw the highlights feed vertical sidebar."""
+        ax = self.feed_ax
+        ax.clear()
+        ax.set_facecolor("#16213e")
+        ax.set_xticks([])
+        ax.set_yticks([])
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+
+        # Title
+        ax.text(0.5, 0.97, "Highlights",
+                ha="center", va="top",
+                fontsize=11, fontweight="bold", color="white",
+                transform=ax.transAxes)
+
+        # Separator line under title
+        ax.axhline(y=0.93, xmin=0.05, xmax=0.95,
+                   color="#444", linewidth=0.8)
+
+        if not self._highlights:
+            ax.text(0.5, 0.50, "Waiting for\naction...",
+                    ha="center", va="center",
+                    fontsize=8, color="#555555", style="italic",
+                    transform=ax.transAxes)
+            return
+
+        # Show the 8 most recent highlights, newest first (top to bottom)
+        recent = list(reversed(self._highlights[-8:]))
+        n      = len(recent)
+        y_top  = 0.88
+        y_bot  = 0.05
+        step   = (y_top - y_bot) / max(n, 1)
+
+        for i, entry in enumerate(recent):
+            y     = y_top - i * step
+            alpha = max(0.35, 1.0 - entry["age"] * 0.02)
+            color = entry["color"]
+
+            # Colored square dot
+            ax.plot(0.07, y, "s",
+                    color=color, markersize=5,
+                    transform=ax.transAxes, clip_on=False,
+                    alpha=alpha)
+
+            # Text — left-aligned after dot
+            ax.text(0.16, y, entry["text"],
+                    ha="left", va="center",
+                    fontsize=7.5, color=color,
+                    alpha=alpha,
+                    wrap=True,
                     transform=ax.transAxes)
 
     # ── Entry point ───────────────────────────────────────────────────────────
