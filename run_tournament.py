@@ -79,7 +79,9 @@ class TournamentUI:
         self._cancel_event   = threading.Event()
         self._cancelled      = False
         self._btn_mode       = "play"  # "play" | "cancel" | "restart"
-        self._eliminations   = {}  # pid -> finishing position
+        self._eliminations       = {}   # pid -> finishing position
+        self._elimination_events = []   # [(pid, hand_num, finishing_pos), ...]
+        self._elim_artists       = []   # matplotlib artists to remove each cycle
 
         self._build_figure()
 
@@ -234,8 +236,16 @@ class TournamentUI:
     def _reset_to_play(self):
         """Reset all state and restore the chart to the initial ready state."""
         # Clear data state first so leaderboard reads clean values
-        self.chip_history  = []
-        self._eliminations = {}
+        self.chip_history        = []
+        self._eliminations       = {}
+        self._elimination_events = []
+        # Remove any leftover marker artists from the main chart
+        for artist in self._elim_artists:
+            try:
+                artist.remove()
+            except Exception:
+                pass
+        self._elim_artists = []
         self.running       = False
         self.finished      = False
         self._cancelled    = False
@@ -328,6 +338,7 @@ class TournamentUI:
                 pos = total - len(finishing)
                 finishing.append((s.player_id, pos))
                 self._eliminations[s.player_id] = pos
+                self._elimination_events.append((s.player_id, hand_num, pos))
                 active_seats.remove(s)
                 print(f"  [OUT] {s.player_id} — position {pos}")
 
@@ -490,6 +501,64 @@ class TournamentUI:
         # Update blinds display
         sb, bb = self._current_blinds
         self.blinds_text.set_text(f"Blinds: {sb}/{bb}")
+
+        # ── Elimination markers ───────────────────────────────────────────────
+        # Remove previous cycle's artists
+        for artist in self._elim_artists:
+            try:
+                artist.remove()
+            except Exception:
+                pass
+        self._elim_artists = []
+
+        if self._elimination_events:
+            total_chips = self.starting_chips * len(self.player_ids)
+            # Sort by finishing position descending (worst finisher first / lowest y)
+            events_sorted = sorted(self._elimination_events,
+                                   key=lambda e: e[2], reverse=True)
+            # Assign staggered y-offsets for events clustered within 5 hands
+            offsets = {}  # index -> y_offset
+            base_offsets = [total_chips * f
+                            for f in (0.03, 0.08, 0.13, 0.18, 0.23, 0.28)]
+            placed = []  # list of (hand_num, offset_level) already placed
+            for ev in events_sorted:
+                pid, hand, pos = ev
+                colour = self.colours.get(pid, "white")
+                # X marker at y=0
+                pts = self.ax.plot(
+                    hand, 0, "X",
+                    color=colour, markersize=12,
+                    markeredgewidth=2.5, zorder=10,
+                )
+                self._elim_artists.extend(pts)
+                # Determine stagger level: count how many already-placed markers
+                # are within 5 hands
+                nearby_levels = [lvl for (h, lvl) in placed
+                                 if abs(h - hand) <= 5]
+                level = 0
+                while level in nearby_levels:
+                    level += 1
+                placed.append((hand, level))
+                y_off = base_offsets[min(level, len(base_offsets) - 1)]
+                ordinal = self._ordinal(pos)
+                ann = self.ax.annotate(
+                    f"{pid} ({ordinal})",
+                    xy=(hand, 0),
+                    xytext=(hand, y_off),
+                    fontsize=7,
+                    color=colour,
+                    ha="center", va="bottom",
+                    bbox=dict(boxstyle="round,pad=0.15",
+                              facecolor="#1a1a2e",
+                              edgecolor="none",
+                              alpha=0.7),
+                    arrowprops=dict(arrowstyle="-",
+                                   color=colour,
+                                   alpha=0.4,
+                                   lw=0.8),
+                    zorder=9,
+                )
+                self._elim_artists.append(ann)
 
         # Cancellation: reset everything back to ready state
         if self._cancelled:
