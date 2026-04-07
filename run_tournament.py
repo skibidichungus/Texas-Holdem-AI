@@ -82,6 +82,7 @@ class TournamentUI:
         self._eliminations       = {}   # pid -> finishing position
         self._elimination_events = []   # [(pid, hand_num, finishing_pos), ...]
         self._elim_artists       = []   # matplotlib artists to remove each cycle
+        self._summary_ax         = None  # overlay axes shown at tournament end
 
         self._build_figure()
 
@@ -246,6 +247,13 @@ class TournamentUI:
             except Exception:
                 pass
         self._elim_artists = []
+        # Remove summary overlay if present
+        if self._summary_ax is not None:
+            try:
+                self._summary_ax.remove()
+            except Exception:
+                pass
+            self._summary_ax = None
         self.running       = False
         self.finished      = False
         self._cancelled    = False
@@ -584,9 +592,118 @@ class TournamentUI:
             self.play_btn.hovercolor = "#e94560"
             self.play_btn.ax.set_facecolor("#0f3460")
             print(f"\nWinner: {winner}  ({hands_played} hands)")
+            self._show_summary_overlay(winner, hands_played)
 
         self._draw_leaderboard()
         self.fig.canvas.draw_idle()
+
+    # ── Summary overlay ───────────────────────────────────────────────────────
+
+    def _show_summary_overlay(self, winner: str, hands_played: int):
+        """Draw a semi-transparent end-of-tournament summary panel."""
+        # Only show once; guard against repeated _poll_redraw calls
+        if self._summary_ax is not None:
+            return
+
+        ax = self.fig.add_axes([0.12, 0.25, 0.50, 0.58])
+        ax.set_facecolor("#1a1a2e")
+        ax.patch.set_alpha(0.92)
+        for spine in ax.spines.values():
+            spine.set_visible(True)
+            spine.set_edgecolor("#ffcc00")
+            spine.set_linewidth(2)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        self._summary_ax = ax
+
+        # ── Title ─────────────────────────────────────────────────────────────
+        ax.text(0.5, 0.93, "Tournament Complete",
+                ha="center", va="top",
+                fontsize=14, fontweight="bold", color="white",
+                transform=ax.transAxes)
+
+        # ── Winner line ───────────────────────────────────────────────────────
+        winner_color = self.colours.get(winner, "#ffcc00")
+        btype = self.bot_types.get(winner, "?")
+        ax.text(0.5, 0.82,
+                f"Winner: ",
+                ha="right", va="top",
+                fontsize=12, color="#ffcc00",
+                transform=ax.transAxes)
+        ax.text(0.5, 0.82,
+                f"{winner} ({btype})",
+                ha="left", va="top",
+                fontsize=12, color=winner_color,
+                transform=ax.transAxes)
+
+        # ── Hands played ──────────────────────────────────────────────────────
+        ax.text(0.5, 0.73,
+                f"Hands played: {hands_played}",
+                ha="center", va="top",
+                fontsize=10, color="white",
+                transform=ax.transAxes)
+
+        # ── Separator ─────────────────────────────────────────────────────────
+        ax.axhline(y=0.66, xmin=0.04, xmax=0.96,
+                   color="#ffcc00", linewidth=0.8, alpha=0.5)
+
+        # ── Results table ─────────────────────────────────────────────────────
+        # Build finishing order: 1st = winner, then eliminated sorted best→worst
+        # _elimination_events: [(pid, hand_num, finishing_pos), ...]
+        # finishing_pos: 1 = best (winner already not in _eliminations)
+        elim_by_pid = {pid: (hand, pos)
+                       for pid, hand, pos in self._elimination_events}
+
+        # Sort all players by finishing position ascending (1st first)
+        all_players = list(self.player_ids)
+        def _finish_pos(pid):
+            if pid == winner:
+                return 1
+            _, pos = elim_by_pid.get(pid, (0, len(all_players)))
+            return pos
+
+        ordered = sorted(all_players, key=_finish_pos)
+
+        row_step = 0.065
+        y_start  = 0.61  # just below separator
+
+        for i, pid in enumerate(ordered):
+            y = y_start - i * row_step
+            if y < 0.02:  # don't draw off the bottom
+                break
+
+            pos      = _finish_pos(pid)
+            ordinal  = self._ordinal(pos)
+            btype_r  = self.bot_types.get(pid, "?")
+            is_winner = (pid == winner)
+
+            if pid in elim_by_pid:
+                hand_survived, _ = elim_by_pid[pid]
+            else:
+                hand_survived = hands_played  # winner
+
+            # Finishing position label
+            ax.text(0.04, y, ordinal,
+                    ha="left", va="top",
+                    fontsize=9, color="#888888",
+                    transform=ax.transAxes)
+
+            # Player name + bot type
+            name_color = (self.colours.get(pid, "white")
+                          if is_winner
+                          else "#555555")
+            ax.text(0.20, y, f"{pid} ({btype_r})",
+                    ha="left", va="top",
+                    fontsize=9, color=name_color,
+                    transform=ax.transAxes)
+
+            # Hands survived
+            ax.text(0.97, y, f"{hand_survived} hands",
+                    ha="right", va="top",
+                    fontsize=9, color="#888888",
+                    transform=ax.transAxes)
 
     # ── Entry point ───────────────────────────────────────────────────────────
 
