@@ -85,13 +85,14 @@ class TournamentUI:
         self._summary_ax         = None  # overlay axes shown at tournament end
         self._highlights         = []   # list of {hand, text, color, age} dicts
         self._last_chip_leader   = None  # tracks chip leader for change detection
+        self._last_ylim          = starting_chips  # last y-axis ceiling set on chart
 
         self._build_figure()
 
     # ── Figure setup ──────────────────────────────────────────────────────────
 
     def _build_figure(self):
-        self.fig = plt.figure(figsize=(13, 7), facecolor="#1a1a2e")
+        self.fig = plt.figure(figsize=(16, 9), facecolor="#1a1a2e")
         self.fig.canvas.manager.set_window_title("Texas Hold'em Tournament")
 
         # Main chart area — centered between highlights sidebar (left) and leaderboard (right)
@@ -288,9 +289,9 @@ class TournamentUI:
         # Restore chart lines to flat starting chips
         for pid, line in self.lines.items():
             line.set_data([0], [self.starting_chips])
-        total_chips = self.starting_chips * len(self.player_ids)
         self.ax.set_xlim(0, 10)
-        self.ax.set_ylim(0, total_chips * 1.05)
+        self.ax.set_ylim(0, self.starting_chips)
+        self._last_ylim = self.starting_chips
         self.blinds_text.set_text(
             f"Blinds: {self.base_sb}/{self.base_bb}")
         # Explicitly wipe the leaderboard axes so no stale artists remain,
@@ -521,6 +522,21 @@ class TournamentUI:
             y = [e.get(pid, 0) for e in self.chip_history]
             line.set_data(hands, y)
         self.ax.set_xlim(0, max(hands) + 1 if hands else 10)
+
+        # ── Dynamic y-axis scaling ────────────────────────────────────────────
+        if self.chip_history:
+            last_snap = self.chip_history[-1]
+            active_chips = [
+                last_snap.get(pid, 0)
+                for pid in self.player_ids
+                if last_snap.get(pid, 0) > 0
+            ]
+            if active_chips:
+                max_chips = max(active_chips)
+                y_max = max(self.starting_chips, max_chips * 1.15)
+                if abs(y_max - self._last_ylim) / self._last_ylim > 0.05:
+                    self.ax.set_ylim(0, y_max)
+                    self._last_ylim = y_max
 
         # Update blinds display
         sb, bb = self._current_blinds
