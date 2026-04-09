@@ -52,13 +52,18 @@ def icm_equity(stacks: dict[str, int]) -> dict[str, float]:
     if n == 1:
         return {pid: (1.0 if stacks[pid] > 0 else 0.0) for pid in stacks}
 
-    total = sum(stacks[p] for p in players)
-    if total == 0:
+    chip_total = sum(stacks[p] for p in players)
+    if chip_total == 0:
         eq = 1.0 / n
         return {pid: (eq if pid in players else 0.0) for pid in stacks}
 
-    # Payout vector: equal shares for simplicity (pure ICM pressure).
-    payouts = [1.0 / n] * n
+    # Top-heavy payout structure: each place pays ~60% of the place above.
+    # This creates real ICM pressure — 1st is worth fighting for, last is
+    # nearly worthless, so short stacks genuinely can't afford to gamble.
+    decay = 0.6
+    raw = [decay ** i for i in range(n)]
+    total = sum(raw)
+    payouts = [p / total for p in raw]  # payouts[0] = 1st place
 
     # Compute probabilities of finishing in each position via recursion.
     equity = {pid: 0.0 for pid in stacks}
@@ -90,11 +95,11 @@ def icm_equity(stacks: dict[str, int]) -> dict[str, float]:
     # Limit recursion depth for large fields (exact ICM is O(N!) but for
     # typical 6-9 player tables it's fine).
     if n <= 8:
-        _recurse(players, total, 0)
+        _recurse(players, chip_total, 0)
     else:
         # Approximation for huge tables: equity ≈ stack fraction
         for pid in players:
-            equity[pid] = stacks[pid] / total
+            equity[pid] = stacks[pid] / chip_total
 
     return equity
 
@@ -226,7 +231,11 @@ class ICMBot:
             call_threshold += 0.06
             bet_threshold += 0.05
             # But if we're desperate (< 5 BBs effective), widen for shove
-            effective_bbs = my_stack / max(1, pot // 3) if pot > 0 else 10
+            bb_est = next(
+                (a["min"] for a in legal if a["type"] in ("bet", "raise")),
+                max(1, pot // 10),  # fallback if no bet action available
+            )
+            effective_bbs = my_stack / max(1, bb_est)
             if effective_bbs < 5:
                 bet_threshold -= 0.15  # push-or-fold territory
 

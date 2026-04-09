@@ -378,10 +378,14 @@ class CFRBot:
         iterations: int = 100,
         profile_path: Optional[str] = None,
         use_average: bool = True,
+        inference_mode: bool = False,
     ):
         self.iterations = iterations
         self.profile_path = profile_path
         self.use_average = use_average
+        # When True, skip _run_iterations during act() so the loaded regret
+        # table is used as-is without being overwritten by online updates.
+        self.inference_mode = inference_mode
 
         # Node map: info_set_key → _CFRNode
         self._nodes: Dict[str, _CFRNode] = {}
@@ -403,8 +407,9 @@ class CFRBot:
         Choose an action for the current game state.
 
         1. Compute the card bucket for the current hand + board.
-        2. Run ``self.iterations`` MCCFR traversals to update regrets.
-        3. Select an action from the (average) strategy profile.
+        2. If NOT in inference_mode, run MCCFR iterations to update regrets.
+        3. Select an action from the (average) strategy profile, falling back
+           to an equity-based heuristic for unseen information sets.
         """
         hole = state.hole_cards
         board = state.board
@@ -413,7 +418,6 @@ class CFRBot:
         legal = state.legal_actions
         street = state.street
         history = state.history or []
-
         # Bail fast if we have no cards (shouldn't happen, but be safe)
         if not hole or len(hole) < 2:
             return _fallback_passive(legal)
@@ -433,11 +437,22 @@ class CFRBot:
         # ── Legal abstract actions ──────────────────────────────
         legal_mask = _legal_abstract_actions(legal, pot)
 
-        # ── Run MCCFR iterations to refine regrets ──────────────
-        self._run_iterations(info_key, legal_mask, pot, hole, board, street)
+        # ── MCCFR updates: only during training, never during inference ──
+        # Running iterations during live play corrupts the loaded regret
+        # table with noise from the simplified value function.
+        if not self.inference_mode:
+            self._run_iterations(info_key, legal_mask, pot, hole, board, street)
 
         # ── Choose action from strategy ─────────────────────────
-        node = self._get_node(info_key)
+        node = self._nodes.get(info_key)
+
+        # Unseen node (especially common in multiway play with a HU-trained
+        # table): fall back to an equity-based heuristic rather than
+        # uniform random, which is what a blank _CFRNode would give.
+        if node is None or sum(node.strategy_sum) == 0.0:
+            equity = self._quick_equity(hole, board)
+            return self._heuristic_action(legal_mask, equity, pot, to_call, legal)
+
         if self.use_average:
             strategy = node.get_average_strategy(legal_mask)
         else:
@@ -508,42 +523,43 @@ class CFRBot:
         """
         Estimate the expected value of taking the given abstract action.
 
-        Uses a simplified model:
-          * fold → lose current investment (value = -1)
-          * check/call → equity × pot (minus cost to call, estimated)
-          * bet/raise → equity × (pot + sizing) adjusted for fold equity
+        Reference point: fold = 0.0 (neutral — we stop investing chips).
+        All other values are relative to this baseline.
 
-        ``equity`` is a pre-computed Monte-Carlo equity estimate in [0, 1]
-        passed in from ``_run_iterations`` to avoid redundant rollouts.
+          * fold      → 0.0  (give up the hand, lose no more chips)
+          * check/call→ equity - 0.5  (positive when favourite, negative when underdog)
+          * bet/raise → blend of fold equity (win pot uncontested) and showdown EV
+
+        ``equity`` is a pre-computed Monte-Carlo equity estimate in [0, 1].
         """
         label = ABSTRACT_ACTIONS[abstract_idx]
 
         if label == "fold":
-            return -1.0
+            # Neutral reference point — we stop putting chips in.
+            return 0.0
 
         if label == "check_call":
-            # Value is proportional to equity
-            return equity * 2.0 - 1.0  # scaled to [-1, 1]
+            # Positive when equity > 50%, negative when underdog.
+            # At 30% equity → -0.2 (worse than folding → correct).
+            return equity - 0.5
 
         # Bet / raise actions
         frac_map = {"bet_33": 0.33, "bet_67": 0.67, "bet_100": 1.00, "all_in": 2.0}
         sizing_frac = frac_map.get(label, 0.5)
 
-        # Model fold equity: opponents fold more often against larger bets
-        # Logistic curve: fold_prob increases with bet size
-        fold_equity = 0.3 * min(1.0, sizing_frac)
+        # Conservative fold equity: larger bets induce more folds, capped at 30%.
+        fold_equity = min(0.30, 0.18 * sizing_frac)
 
-        # When opponent calls, we see a showdown
-        showdown_value = equity * 2.0 - 1.0
+        # Showdown value (same scale as check_call baseline).
+        showdown_value = equity - 0.5
 
-        # When opponent folds, we win the pot (value ≈ +1 adjusted for risk)
-        fold_value = 0.5
+        # Winning the pot uncontested is a small but real gain.
+        fold_gain = 0.25
 
-        value = fold_equity * fold_value + (1.0 - fold_equity) * showdown_value
+        value = fold_equity * fold_gain + (1.0 - fold_equity) * showdown_value
 
-        # Penalise large bets slightly to avoid reckless aggression
-        risk_penalty = 0.05 * sizing_frac
-        value -= risk_penalty
+        # Small risk penalty for large bets to discourage reckless shoves.
+        value -= 0.02 * min(sizing_frac, 1.5)
 
         return value
 
@@ -595,6 +611,48 @@ class CFRBot:
             total += 1
 
         return wins / total if total > 0 else 0.5
+
+    def _heuristic_action(
+        self,
+        legal_mask: List[int],
+        equity: float,
+        pot: int,
+        to_call: int,
+        legal: List[Dict[str, Any]],
+    ) -> Action:
+        """
+        Equity-based fallback for information sets not seen during training.
+
+        Tiers:
+          equity ≥ 0.65  → bet (raise if possible) for value
+          equity ≥ 0.45  → call/check if pot odds justify it, else fold
+          equity < 0.45  → check if free, else fold
+        """
+        if equity >= 0.65:
+            # Strong hand: bet for value using the largest available sizing.
+            bet_actions = [a for a in legal_mask if a >= 2]
+            if bet_actions:
+                return _abstract_to_concrete(max(bet_actions), legal, pot)
+            # No bet available → check/call
+            return _abstract_to_concrete(1, legal, pot)
+
+        if equity >= 0.45:
+            # Marginal hand: call only if pot odds warrant it.
+            total = pot + to_call
+            pot_odds = to_call / total if total > 0 else 0.0
+            if pot_odds <= equity:
+                return _abstract_to_concrete(1, legal, pot)   # check/call
+            # Bad odds → fold if allowed, else forced call
+            if 0 in legal_mask:
+                return _abstract_to_concrete(0, legal, pot)   # fold
+            return _abstract_to_concrete(1, legal, pot)
+
+        # Weak hand: check for free, otherwise fold.
+        if to_call == 0 and 1 in legal_mask:
+            return _abstract_to_concrete(1, legal, pot)       # free check
+        if 0 in legal_mask:
+            return _abstract_to_concrete(0, legal, pot)       # fold
+        return _abstract_to_concrete(1, legal, pot)           # forced call
 
     # ──────────────────────────────────────────────────────────────────────────
     #  Node management

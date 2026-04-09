@@ -70,7 +70,7 @@ def create_bot(btype: str) -> BotAdapter:
 
     if btype in ("cfr", "cfrbot"):
         from bots.cfr_bot import CFRBot
-        return _wrap(CFRBot(profile_path="models/cfr_regret.pkl"))
+        return _wrap(CFRBot(profile_path="models/cfr_regret_deep.pkl", inference_mode=True))
 
     raise ValueError(f"Unknown bot type: {btype!r}. "
                      "Expected one of: mc, mc<N>, smart, ml, rl, rl:<path>, random, "

@@ -154,6 +154,10 @@ class OpponentModelBot:
         # Check for a new hand (history resets or shrinks)
         if len(history) < self._last_processed_len:
             self._on_new_hand(opponents)
+
+        # Only process entries we haven't seen yet — slicing here prevents
+        # every action from being Bayesian-updated multiple times per hand.
+        new_entries = history[self._last_processed_len:]
         self._last_processed_len = len(history)
 
         # Ensure every opponent has a prior
@@ -161,8 +165,8 @@ class OpponentModelBot:
             if opp not in self._ranges:
                 self._ranges[opp] = _uniform_prior()
 
-        # ---- Update opponent ranges from new history entries ----
-        self._update_ranges_from_history(history, state.me, board)
+        # ---- Update opponent ranges from new history entries only ----
+        self._update_ranges_from_history(new_entries, state.me, board)
 
         # ---- Estimate equity against modelled ranges ----
         equity = self._estimate_equity_vs_ranges(
@@ -173,10 +177,10 @@ class OpponentModelBot:
         pos_tight = self._get_position_tightness(position)
         if pos_tight > 0.5:  # early position → tighter thresholds
             bet_thresh = 0.68
-            raise_thresh = 0.62
+            reraise_thresh = 0.72
         else:
             bet_thresh = 0.58
-            raise_thresh = 0.52
+            reraise_thresh = 0.68
 
         pot_odds = to_call / (pot + to_call) if (pot + to_call) > 0 else 0.0
 
@@ -193,7 +197,7 @@ class OpponentModelBot:
                 return self._choose("fold", legal)
 
             # Medium → call
-            if equity < raise_thresh:
+            if equity < reraise_thresh:
                 return self._choose("call", legal)
 
             # Strong → raise
