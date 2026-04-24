@@ -359,11 +359,14 @@ class Table:
         # ring[0]=BTN, ring[1]=SB, ring[2]=BB, ring[3]=UTG (first to act preflop)
         preflop_start = 3 if len(ring) > 2 else 0
 
+        # folded_pids persists across all streets so a preflop fold stays folded
+        folded_pids: set = set()
+
         streets = [
-            ("preflop", self._betting_round, {"start_idx": preflop_start}),
-            ("flop",    self._deal_flop_then_bet,  {}),
-            ("turn",    self._deal_turn_then_bet,   {}),
-            ("river",   self._deal_river_then_bet,  {}),
+            ("preflop", self._betting_round, {"start_idx": preflop_start, "folded_pids": folded_pids}),
+            ("flop",    self._deal_flop_then_bet,  {"start_idx": 1, "folded_pids": folded_pids}),
+            ("turn",    self._deal_turn_then_bet,   {"start_idx": 1, "folded_pids": folded_pids}),
+            ("river",   self._deal_river_then_bet,  {"start_idx": 1, "folded_pids": folded_pids}),
         ]
 
         # Total pot accumulated from completed streets
@@ -457,7 +460,8 @@ class Table:
 
     def _betting_round(
         self, street, seats, ring, pos_by_pid, hole, board, contrib, pot, bb,
-        bot_for, history, on_event, logger, start_idx: int = 0
+        bot_for, history, on_event, logger, start_idx: int = 0,
+        folded_pids: set = None
     ):
         # print(f"\n=== BETTING ROUND START: {street} ===")
         # print(f"Pot before street: {pot}")
@@ -471,11 +475,20 @@ class Table:
             for s in seats:
                 contrib.setdefault(s.player_id, 0)
 
-        folded = defaultdict(bool)
+        # Use the hand-level folded set so preflop folds carry over
+        if folded_pids is None:
+            folded_pids = set()
+        folded = folded_pids  # alias; mutations here persist across streets
         allin = defaultdict(bool)
 
         current_bet = max(contrib.values()) if contrib else 0
         last_raise_size = bb if current_bet > 0 else bb
+
+        # has_acted tracks which live players have had a chance to act since
+        # the last aggression (bet/raise) on this street.  The street only
+        # ends when every live, non-all-in player is in has_acted AND
+        # contributions are all equal.
+        has_acted: set = set()
 
         # ---- helpers ----
         def num_players_can_act():
@@ -483,7 +496,7 @@ class Table:
             for i in ring:
                 s = seats[i]
                 pid = s.player_id
-                if folded[pid] or allin[pid] or s.chips <= 0:
+                if pid in folded or allin[pid] or s.chips <= 0:
                     continue
                 cnt += 1
             return cnt
@@ -494,7 +507,7 @@ class Table:
             for i in ring:
                 s = seats[i]
                 pid = s.player_id
-                if folded[pid]:
+                if pid in folded:
                     continue
                 if allin[pid]:
                     continue
@@ -505,7 +518,10 @@ class Table:
                 contribs.add(contrib[pid])
             if len(live) <= 1:
                 return True
-            return len(contribs) == 1
+            # Every live player must have acted since the last bet/raise
+            # AND all contributions must be equal before we close the street.
+            all_acted = all(pid in has_acted for pid in live)
+            return all_acted and len(contribs) == 1
 
         idx = start_idx % len(ring)
         safety = 0
@@ -526,7 +542,7 @@ class Table:
             pid = seat.player_id
 
             # Skip dead players
-            if folded[pid] or allin[pid] or seat.chips <= 0:
+            if pid in folded or allin[pid] or seat.chips <= 0:
                 idx = (idx + 1) % len(ring)
                 if all_live_equal():
                     break
@@ -584,7 +600,12 @@ class Table:
                 max_raise=pv_max_raise,
                 legal_actions=legal,
                 stacks={seats[i].player_id: seats[i].chips for i in ring},
-                opponents=[seats[i].player_id for i in ring if seats[i].player_id != pid],
+                opponents=[
+                    seats[i].player_id for i in ring
+                    if seats[i].player_id != pid
+                    and seats[i].player_id not in folded
+                    and seats[i].chips > 0
+                ],
                 history=list(history),
             )
 
@@ -649,7 +670,7 @@ class Table:
 
             # APPLY ACTION
             if action.type == "fold":
-                folded[pid] = True
+                folded.add(pid)  # persists across streets via folded_pids
                 hole[pid] = []
                 # print(f"    {pid} FOLDS")
 
@@ -685,7 +706,12 @@ class Table:
                     if raise_sz > 0:
                         last_raise_size = raise_sz
 
+                # A bet/raise resets the "acted" tracker — everyone must respond
+                has_acted.clear()
                 # print(f"    {pid} {action.type.upper()} to {target_total} (paid {need})")
+
+            # Record that this player has acted this street
+            has_acted.add(pid)
 
             if all_live_equal():
                 # print("All live equal → ending street")
@@ -696,7 +722,7 @@ class Table:
 
             idx = (idx + 1) % len(ring)
 
-        alive = [seats[i].player_id for i in ring if not folded[seats[i].player_id]]
+        alive = [seats[i].player_id for i in ring if seats[i].player_id not in folded]
         # print(f"=== BETTING ROUND END: {street} | Alive: {alive} ===")
 
         if len(alive) == 1:

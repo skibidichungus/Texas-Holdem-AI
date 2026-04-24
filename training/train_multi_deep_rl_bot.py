@@ -1,6 +1,6 @@
 """
-training/train_deep_rl_bot.py
-─────────────────────────────
+training/train_multi_deep_rl_bot.py
+───────────────────────────────────
 Multi-player PPO training for RLBot.
 
 Table layout
@@ -29,7 +29,7 @@ Checkpoint / output
 
 Usage
 ─────
-    python training/train_deep_rl_bot.py [--episodes N] [--chips N]
+    python training/train_multi_deep_rl_bot.py [--episodes N] [--chips N]
                                           [--csv PATH] [--lr_step N]
                                           [--no_load]
 """
@@ -97,7 +97,7 @@ def _build_opponent_pool() -> list[tuple[str, BotAdapter]]:
 
 # ── Main training function ────────────────────────────────────────────────────
 
-def train_deep_rl_bot(
+def train_multi_deep_rl_bot(
     num_episodes:     int = 20_000,
     chips_per_player: int = 500,
     csv_path:         str | None = None,
@@ -345,7 +345,7 @@ if __name__ == "__main__":
 
     os.makedirs("output", exist_ok=True)
 
-    train_deep_rl_bot(
+    train_multi_deep_rl_bot(
         num_episodes=args.episodes,
         chips_per_player=args.chips,
         csv_path=args.csv,

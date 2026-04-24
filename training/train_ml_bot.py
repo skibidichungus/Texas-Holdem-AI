@@ -9,7 +9,7 @@ from torch.utils.data import Dataset, DataLoader
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, project_root)
 
-from models.poker_mlp import PokerMLP
+from bots.poker_mlp import PokerMLP
 
 import torch.nn as nn
 

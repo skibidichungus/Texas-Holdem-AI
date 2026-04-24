@@ -27,3 +27,4 @@ venv/
 tournament_progress.png
 .venv/
 models/*.pkl
+models/*.pt

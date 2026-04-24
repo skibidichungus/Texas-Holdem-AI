@@ -8,6 +8,44 @@ This plan is the combined result of brainstorming with two chat agents (ChatGPT 
 
 ---
 
+## Locked decisions (from brainstorm)
+
+- **Real match format:** 6 players, winner-take-all, one shot, no info on the 5 opposing bots beforehand.
+- **Training table size:** 6 seats (match the real format).
+- **Payout implication:** 2nd place = 6th place = zero. So survival-for-survival's-sake is worth less than it looks. What matters is reaching heads-up *with chips* AND winning heads-up. Two separate skills, both trained.
+- **ICM simplifies:** since winner-take-all, "tournament equity" = P(winning the whole thing). Much cleaner than multi-prize ICM. We estimate this via simulation during training instead of running full ICM math.
+- **Multi-way vs heads-up framing:** not a contradiction. Train multi-way for survival + chip accumulation, *then* fine-tune heads-up specialists for the endgame (Step 13). Both phases matter.
+- **Hardware:** Apple M5 Max — 18 CPU cores (~10x scaling measured), 40-core GPU via MPS (~8x speedup on models ≥2048 hidden), 64GB RAM. See `HARDWARE_BENCHMARK.md`.
+- **Imitation target:** CFR bot (currently strongest). Regenerating the dataset on the M5.
+- **Parallelization plan:**
+  - Week 1 (data gen + AIVAT labeling + eval): use `multiprocessing.Pool(18)`. Embarrassingly parallel, free 10x.
+  - Week 1 (CFR retraining): CFR needs special handling — not embarrassingly parallel because all workers update the same regret table. See "CFR parallelization" section below.
+  - Week 4+ (PPO training loop): vectorized envs or async actors. Architectural choice, tackled when we get there — not front-loaded.
+
+---
+
+## CFR parallelization (optional future optimization — not required)
+
+For the Week 1 CFR retrain we run **single-threaded overnight** — no parallelization needed. The time budget is "timeless" and single-threaded is the theoretical gold standard (no drift, clean convergence).
+
+This section is reference material in case we want to speed up a *future* CFR retrain, not a prerequisite for Week 1.
+
+CFR is different from data-gen or eval workloads. Workers can't just run independent tournaments and merge chip counts — they all need to update the *shared* regret table, and naive parallel writes will race and corrupt the data. Four real options if we ever revisit this:
+
+**Option 1 — Per-worker regret tables, merged periodically.** Each of the 18 workers keeps its own regret dict, trains independently, and every N episodes the main process merges them (sum the regrets, re-normalize). Simplest to implement. Workers drift between merges, so there's a small quality loss per iteration (~5–10%), but merges every 100–500 episodes keep drift tight. Runs at ~8–10x wall-clock speedup.
+
+**Option 2 — Shared regret table with a lock.** All workers write to the same `multiprocessing.Manager().dict()`. Correctness is perfect — no drift. But lock contention kills most of the parallel speedup. Not worth it in practice.
+
+**Option 3 — Lock-free shared memory via numpy arrays.** Map regrets to fixed-size numpy arrays in shared memory, workers do atomic-ish updates. Fastest and most correct. Most complex to implement (requires re-keying the regret dict to integer indices).
+
+**Option 4 — Ensemble of independent CFR runs.** Train 6–10 independent CFR models on separate workers (no merging, fully independent), then at inference time average their regret tables. This is how a lot of published poker research bots are actually trained. The independent convergence paths smooth out each other's blind spots. Often the highest final quality, but adds complexity at inference (bot has to load/merge multiple files).
+
+**When to revisit:** only if we find the single-threaded CFR retrain is a real bottleneck *and* we want to iterate on CFR multiple times. For a one-shot retrain, single-threaded overnight is fine.
+- **"AIVAT" naming:** technically a misnomer for what we're doing. The real name is "full-information equity shaping" — we peek at opponent cards during training and reward by actual equity. Works fine, just not literally the AIVAT paper's method.
+- **Time budget:** timeless. Overnight / weekend runs are fine.
+
+---
+
 ## The 3 things that matter most
 
 Both agents agreed these are the real leverage points:
@@ -96,7 +134,7 @@ Train against a rotating pool of opponents in the actual match format (5–7 pla
 
 - Snapshot the current RL bot every 500–1000 episodes, add to pool
 - Each match, fill the other seats by random sampling from the pool (with replacement, weighted toward opponents causing recent losses)
-- Use `train_deep_rl_bot.py` as the starting point (already multi-opponent — just expand it)
+- Use `train_multi_deep_rl_bot.py` as the starting point (already multi-opponent — just expand it)
 
 This avoids two classic failure modes:
 
@@ -195,12 +233,15 @@ If you want to go nuclear: swap PPO for Deep CFR or ReBeL. These are purpose-bui
 
 ### Week 1 — Infrastructure
 
-- Run tournaments to generate dataset (Step 1)
-- Implement AIVAT reward (Step 2)
-- Validate AIVAT: fold AA test case
-- Build proper eval harness: 10k-hand matches with confidence intervals
+- **Overnight background run:** retrain CFR for 6-seat tables (current profile is 4-max). Save to a new profile file, don't overwrite existing. Runs unattended while we work on everything else below.
+- Parallelize data-gen + eval with `Pool(18)` before anything else
+- Run tournaments to generate dataset at 6-seat tables (Step 1), using the newly retrained CFR as the main imitation target
+- Implement full-info equity reward with ICM = P(winning tournament) (Step 2)
+- Validate reward: fold AA test case, short-stack shove test case
+- Build proper eval harness: 500–1000 tournament matches with Wilson CIs on win rate
 - Randomize stack depths in training envs
 - Fix BB position-encoding bug (Step 8)
+- Drop fixed 10% exploration (Step 7) — it's a one-liner, do it now
 
 ### Week 2 — Architecture upgrade
 
@@ -214,11 +255,12 @@ If you want to go nuclear: swap PPO for Deep CFR or ReBeL. These are purpose-bui
 - Target: warm-started bot breaks even vs CFR heads-up
 - If getting crushed, stop and debug before starting RL
 
-### Week 4–5 — PPO vs fixed pool
+### Week 4–5 — PPO vs fixed pool (multi-way first)
 
-- Train heads-up against `{MC200, CFR, GTO, heuristic, warm-started-frozen}` (~20–30M hands)
-- Drop the fixed 10% exploration (Step 7)
-- Monitor: AIVAT/hand going up, entropy not collapsing, KL to warm-start not exploding
+- Parallelize the PPO training loop — vectorized envs or async actors
+- Train 6-seat multi-way against `{MC200, CFR, GTO, heuristic, warm-started-frozen}` (~20–30M hands)
+- Goal here: survival + chip accumulation at the real table size. Heads-up specialists come in Week 8.
+- Monitor: reward/hand going up, entropy not collapsing, KL to warm-start not exploding
 - Checkpoint every 500k hands
 
 ### Week 6–7 — League self-play
@@ -227,10 +269,11 @@ If you want to go nuclear: swap PPO for Deep CFR or ReBeL. These are purpose-bui
 - Use NFSP-style mixing (play against average of past policies, not just latest)
 - Track exploitability; stop when it plateaus
 
-### Week 8 — Targeted fine-tunes (optional)
+### Week 8 — Heads-up specialists (the endgame)
 
-- Three specialist clones, one per target opponent (Step 13)
-- KL regularization back to league policy
+- Clone the league-trained bot, fine-tune specialists for heads-up vs each archetype (tight, aggro, GTO-ish, etc.)
+- KL regularization back to league policy (β ~ 0.01) so specialists don't drift too far
+- On gameday, since we don't know who's left heads-up, we pick a specialist based on what we *observed* from the opponent during the multi-way phase
 
 ### Week 9 — Final eval
 

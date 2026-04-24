@@ -1,7 +1,7 @@
 import torch
 from core.bot_api import Action
 from core.engine import eval_hand, EVAL_HAND_MAX
-from models.poker_mlp import PokerMLP
+from bots.poker_mlp import PokerMLP
 
 
 

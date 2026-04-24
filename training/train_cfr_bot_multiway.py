@@ -1,12 +1,12 @@
 """
 Train the CFR bot for multi-player deep-stack conditions.
 
-Four CFRBot instances (all sharing the same regret table) are placed on
-seats P1–P4 simultaneously.  Every hand updates regrets from all four
+Six CFRBot instances (all sharing the same regret table) are placed on
+seats P1–P6 simultaneously.  Every hand updates regrets from all six
 perspectives, giving the table broader multi-way situation coverage.
 
-This mirrors the UI tournament format:
-  * 4 players per table
+This mirrors the real gameday tournament format:
+  * 6 players per table (match the real 6-group tournament)
   * 1 000 chip starting stacks
   * 5/10 blinds with 1.5× escalation every 50 hands
 
@@ -21,7 +21,7 @@ This is already the design in CFRBot; this script simply inherits it.
 
 Convergence note
 ----------------
-In 4-way self-play the expected win-rate for each seat is ~25 %.  That is the
+In 6-way self-play the expected win-rate for each seat is ~16.7 %.  That is the
 sign of healthy convergence, not a bug.  Track ``info_sets`` and
 ``total_iters`` (printed every 1 000 episodes).
 
@@ -71,7 +71,7 @@ class _CFRAdapter(BotAdapter):
 #  Main training function
 # ---------------------------------------------------------------------------
 
-PLAYER_IDS = ["P1", "P2", "P3", "P4"]
+PLAYER_IDS = ["P1", "P2", "P3", "P4", "P5", "P6"]
 NUM_PLAYERS = len(PLAYER_IDS)
 
 BASE_SB = 5
@@ -90,7 +90,7 @@ def train_cfr_bot_multiway(
     Run multi-player CFR self-play for ``num_tournaments`` episodes.
 
     Args:
-        num_tournaments:  Number of 4-player tournament episodes.
+        num_tournaments:  Number of 6-player tournament episodes.
         chips_per_player: Starting chip stack per seat (default 1 000).
         iterations:       MCCFR rollouts per decision point.
         save_every:       Persist the regret table every N episodes.
@@ -100,7 +100,7 @@ def train_cfr_bot_multiway(
         The trained CFRBot instance.
     """
     print("=" * 70)
-    print("TRAINING CFR BOT  (4-player deep-stack self-play)")
+    print("TRAINING CFR BOT  (6-player deep-stack self-play)")
     print("=" * 70)
     print(f"Episodes:         {num_tournaments}")
     print(f"Players:          {NUM_PLAYERS}  ({', '.join(PLAYER_IDS)})")
@@ -130,92 +130,97 @@ def train_cfr_bot_multiway(
     else:
         print("No existing profile found — starting fresh.\n")
 
-    # ── One shared adapter: all 4 seats reference the same CFRBot ────────────
+    # ── One shared adapter: all 6 seats reference the same CFRBot ────────────
     adapter = _CFRAdapter(bot)
 
     table = Table()
     wins = {pid: 0 for pid in PLAYER_IDS}
 
     # ── Main training loop ───────────────────────────────────────────────────
-    for episode in range(1, num_tournaments + 1):
+    try:
+        for episode in range(1, num_tournaments + 1):
 
-        # Fresh chip stacks each episode
-        seats = [Seat(player_id=pid, chips=chips_per_player) for pid in PLAYER_IDS]
+            # Fresh chip stacks each episode
+            seats = [Seat(player_id=pid, chips=chips_per_player) for pid in PLAYER_IDS]
 
-        # All seats share the same adapter (and therefore the same regret table)
-        bots = {pid: InProcessBot(adapter) for pid in PLAYER_IDS}
+            # All seats share the same adapter (and therefore the same regret table)
+            bots = {pid: InProcessBot(adapter) for pid in PLAYER_IDS}
 
-        # ── Play hands until one player remains ──────────────────────────────
-        dealer_index = 0
-        hand_count = 0
-        winner = None
+            # ── Play hands until one player remains ──────────────────────────
+            dealer_index = 0
+            hand_count = 0
+            winner = None
 
-        while True:
-            active_seats = [s for s in seats if s.chips > 0]
-            if len(active_seats) <= 1:
-                winner = active_seats[0].player_id if active_seats else None
-                break
+            while True:
+                active_seats = [s for s in seats if s.chips > 0]
+                if len(active_seats) <= 1:
+                    winner = active_seats[0].player_id if active_seats else None
+                    break
 
-            # Blind escalation: 1.5× every BLIND_ESCALATION_EVERY hands
-            sb, bb = escalate_blinds(
-                hand_count + 1,
-                BASE_SB,
-                BASE_BB,
-                BLIND_ESCALATION_EVERY,
-            )
+                # Blind escalation: 1.5× every BLIND_ESCALATION_EVERY hands
+                sb, bb = escalate_blinds(
+                    hand_count + 1,
+                    BASE_SB,
+                    BASE_BB,
+                    BLIND_ESCALATION_EVERY,
+                )
 
-            table.play_hand(
-                seats=active_seats,
-                small_blind=sb,
-                big_blind=bb,
-                dealer_index=dealer_index % len(active_seats),
-                bot_for={s.player_id: bots[s.player_id] for s in active_seats},
-                on_event=None,
-                log_decisions=False,
-            )
+                table.play_hand(
+                    seats=active_seats,
+                    small_blind=sb,
+                    big_blind=bb,
+                    dealer_index=dealer_index % len(active_seats),
+                    bot_for={s.player_id: bots[s.player_id] for s in active_seats},
+                    on_event=None,
+                    log_decisions=False,
+                )
 
-            dealer_index = (dealer_index + 1) % len(active_seats)
-            hand_count += 1
+                dealer_index = (dealer_index + 1) % len(active_seats)
+                hand_count += 1
 
-            if hand_count > 10_000:      # safety cap
-                winner = max(seats, key=lambda s: s.chips).player_id
-                break
+                if hand_count > 10_000:      # safety cap
+                    winner = max(seats, key=lambda s: s.chips).player_id
+                    break
 
-        # ── Episode bookkeeping ──────────────────────────────────────────────
-        if winner and winner in wins:
-            wins[winner] += 1
+            # ── Episode bookkeeping ──────────────────────────────────────────
+            if winner and winner in wins:
+                wins[winner] += 1
 
-        # ── Periodic save ────────────────────────────────────────────────────
-        if episode % save_every == 0:
-            bot.save(profile_path)
+            # ── Periodic save ────────────────────────────────────────────────
+            if episode % save_every == 0:
+                bot.save(profile_path)
 
-        # ── Progress report every 1 000 episodes ─────────────────────────────
-        if episode % 1_000 == 0:
-            s = bot.stats()
-            win_rates = "  ".join(
-                f"{pid}={wins[pid]/episode:.1%}" for pid in PLAYER_IDS
-            )
-            print(
-                f"  ep={episode:>7}  "
-                f"info_sets={s['info_sets']:<7}  "
-                f"total_iters={s['total_iterations']:<10}  "
-                f"{win_rates}"
-            )
+            # ── Progress report every 1 000 episodes ─────────────────────────
+            if episode % 1_000 == 0:
+                s = bot.stats()
+                win_rates = "  ".join(
+                    f"{pid}={wins[pid]/episode:.1%}" for pid in PLAYER_IDS
+                )
+                print(
+                    f"  ep={episode:>7}  "
+                    f"info_sets={s['info_sets']:<7}  "
+                    f"total_iters={s['total_iterations']:<10}  "
+                    f"{win_rates}"
+                )
 
-    # ── End of training ───────────────────────────────────────────────────────
-    bot.save(profile_path)
+    except KeyboardInterrupt:
+        print("\n[Training interrupted by user — saving checkpoint …]")
+    finally:
+        # ── End of training (normal finish or Ctrl+C) ─────────────────────────
+        bot.save(profile_path)
 
-    final_stats = bot.stats()
-    print(f"\n{'=' * 70}")
-    print(f"Training complete.")
-    print(f"  Episodes:       {num_tournaments}")
-    for pid in PLAYER_IDS:
-        wr = wins[pid] / num_tournaments if num_tournaments > 0 else 0.0
-        print(f"  {pid} wins:      {wins[pid]} / {num_tournaments}  ({wr:.1%})")
-    print(f"  Info sets:      {final_stats['info_sets']}")
-    print(f"  Total iters:    {final_stats['total_iterations']}")
-    print(f"  Profile saved:  {profile_path}")
-    print(f"{'=' * 70}")
+        final_stats = bot.stats()
+        print(f"\n{'=' * 70}")
+        print(f"Training complete.")
+        print(f"  Episodes:       {num_tournaments}")
+        for pid in PLAYER_IDS:
+            ep_played = sum(wins.values())  # episodes where a winner was recorded
+            wr = wins[pid] / num_tournaments if num_tournaments > 0 else 0.0
+            print(f"  {pid} wins:      {wins[pid]} / {num_tournaments}  ({wr:.1%})")
+        print(f"  Info sets:      {final_stats['info_sets']}")
+        print(f"  Total iters:    {final_stats['total_iterations']}")
+        print(f"  Profile saved:  {profile_path}")
+        print(f"{'=' * 70}")
 
     return bot
 
@@ -226,11 +231,11 @@ def train_cfr_bot_multiway(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Train CFR bot via 4-player deep-stack self-play (MCCFR)"
+        description="Train CFR bot via 6-player deep-stack self-play (MCCFR)"
     )
     parser.add_argument(
         "--tournaments", type=int, default=50_000,
-        help="Number of 4-player tournament episodes (default: 50000)"
+        help="Number of 6-player tournament episodes (default: 50000)"
     )
     parser.add_argument(
         "--chips", type=int, default=1_000,

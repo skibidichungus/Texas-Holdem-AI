@@ -190,7 +190,7 @@ def phase_gpu(fp, quick=False, heavy=False):
 
     try:
         import torch
-        from models.poker_mlp import PokerMLP
+        from bots.poker_mlp import PokerMLP
     except ImportError as e:
         log(fp, f"Skipping GPU phase — import failed: {e}")
         return

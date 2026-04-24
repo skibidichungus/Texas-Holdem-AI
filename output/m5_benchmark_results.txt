@@ -18,3 +18,40 @@ PHASE 2 — CPU STRESS (parallel tournaments)
 Workload: 36 tournaments (4 bots each, cap 800 hands)
  Workers    Wall sec   Total hands   Hands/sec    Speedup vs 1
 ----------------------------------------------------------------------
+       1      448.39         13941        31.1           1.00x
+       6       97.70         13941       142.7           4.59x
+      12       58.92         13941       236.6           7.61x
+      18       43.08         13941       323.6          10.41x
+
+======================================================================
+PHASE 3 — GPU BENCHMARK (PyTorch CPU vs MPS)
+======================================================================
+
+-- Matrix multiplication (square NxN @ NxN, fp32) --
+  Size             CPU             MPS  Speedup
+  1024     1.20ms/1.79TF     0.43ms/5.00TF  2.79x
+  2048     9.34ms/1.84TF     1.17ms/14.73TF  8.01x
+  4096    79.85ms/1.72TF     9.15ms/15.02TF  8.73x
+  8192   644.77ms/1.71TF    76.39ms/14.39TF  8.44x
+
+-- PokerMLP (256 hidden, 6-way classification) training --
+batch=1024, steps=200
+Device    Wall sec   Steps/sec   Samples/sec
+   CPU        0.18      1138.5       1165797
+   MPS        0.13      1586.0       1624026
+
+-- BigModel MLP (4 x 2048 hidden, ~17M params) training --
+batch=4096, steps=300
+Device    Wall sec   Steps/sec   Samples/sec
+   CPU       55.38         5.4         22187
+   MPS        7.23        41.5        169871
+
+-- Sustained matmul stress (4096x4096 fp32, 60s per device) --
+Device   First 10s TF/s    Last 10s TF/s   Sustained
+   CPU            1.72            1.72      100.0%
+   MPS           13.22           11.36       85.9%
+
+======================================================================
+DONE — total wall time: 861.9s
+Full log: /Users/jaroslavaupart/Desktop/Projects/Texas-Holdem-AI/output/m5_benchmark_results.txt
+======================================================================

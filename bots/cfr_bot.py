@@ -680,6 +680,11 @@ class CFRBot:
     def save(self, path: Optional[str] = None):
         """
         Persist the regret and strategy tables to disk as a pickle file.
+
+        The write is atomic: data is written to ``path + ".tmp"`` first,
+        flushed and fsynced, then renamed over ``path``.  A crash or
+        KeyboardInterrupt during the dump therefore cannot corrupt the
+        existing checkpoint.
         """
         path = path or self.profile_path
         if not path:
@@ -694,8 +699,12 @@ class CFRBot:
             "hands_played": self._hands_played,
             "total_iterations": self._total_iterations,
         }
-        with open(path, "wb") as f:
+        tmp_path = path + ".tmp"
+        with open(tmp_path, "wb") as f:
             pickle.dump(data, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
 
     def load(self, path: Optional[str] = None):
         """
