@@ -25,3 +25,5 @@ venv/
 
 # Generated tournament charts
 tournament_progress.png
+.venv/
+models/*.pkl

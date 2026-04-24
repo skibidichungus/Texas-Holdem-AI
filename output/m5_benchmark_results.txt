@@ -1,0 +1,20 @@
+======================================================================
+PHASE 1 — SYSTEM INFO
+======================================================================
+Date:            2026-04-23T23:23:52
+Platform:        macOS-26.4-arm64-arm-64bit
+Python:          3.12.13
+Chip:            Apple M5 Max
+Total cores:     18  (performance: 6, efficiency: 12)
+RAM:             64.0 GB
+PyTorch:         2.11.0
+  MPS available: True
+  MPS built:     True
+  CUDA:          False
+
+======================================================================
+PHASE 2 — CPU STRESS (parallel tournaments)
+======================================================================
+Workload: 36 tournaments (4 bots each, cap 800 hands)
+ Workers    Wall sec   Total hands   Hands/sec    Speedup vs 1
+----------------------------------------------------------------------
